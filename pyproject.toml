@@ -1,0 +1,68 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "omnivoice-server"
+version = "0.1.0"
+description = "OpenAI-compatible HTTP server for OmniVoice TTS"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [{ name = "zamery", email = "matthew.ngo1114@gmail.com" }]
+
+keywords = ["tts", "text-to-speech", "omnivoice", "openai", "fastapi", "voice-cloning"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
+
+dependencies = [
+    # FIX: pin omnivoice to a compatible minor series.
+    # OmniVoice is brand-new (April 2026) and its API may change in 0.2.x.
+    # Widen this bound only after reviewing upstream changelogs.
+    "omnivoice>=0.1.0,<0.2.0",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "python-multipart>=0.0.12",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "psutil>=6.0.0",
+    "huggingface-hub>=0.26.0",
+    "torchaudio>=2.0.0",
+]
+
+[project.optional-dependencies]
+benchmark = ["psutil", "tqdm"]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "httpx>=0.27.0",
+    "ruff>=0.6.0",
+    "mypy>=1.11.0",
+]
+
+[project.scripts]
+omnivoice-server = "omnivoice_server.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["omnivoice_server"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = false
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

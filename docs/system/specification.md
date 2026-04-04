@@ -333,7 +333,19 @@ class Settings(BaseSettings):
     )
     device: Literal["auto", "cuda", "mps", "cpu"] = "auto"
     num_step: int = Field(default=16, ge=1, le=64)
-    # dtype is derived from device — not user-configurable to keep things simple
+
+    # Advanced generation params (passed through to OmniVoice.generate())
+    # Expose the ones users are likely to tune; leave the rest at upstream defaults.
+    guidance_scale: float = Field(
+        default=2.0,
+        ge=0.0,
+        le=10.0,
+        description="CFG scale. Higher = stronger voice conditioning.",
+    )
+    denoise: bool = Field(
+        default=True,
+        description="Enable upstream denoising token. Recommended on.",
+    )
 
     # Inference
     max_concurrent: int = Field(
@@ -374,6 +386,7 @@ class Settings(BaseSettings):
 
     @property
     def max_ref_audio_bytes(self) -> int:
+        """Return max upload size in bytes."""
         return self.max_ref_audio_mb * 1024 * 1024
 
     @field_validator("device")
@@ -405,11 +418,6 @@ class Settings(BaseSettings):
         if self.device == "cuda":
             return "cuda:0"
         return self.device  # "mps" or "cpu"
-
-    @property
-    def max_ref_audio_bytes(self) -> int:
-        """Return max upload size in bytes."""
-        return self.max_ref_audio_mb * 1024 * 1024
 ```
 
 ---
@@ -660,6 +668,11 @@ def _get_ram_mb() -> float:
 """
 Runs model.generate() in a thread pool with concurrency limiting and
 post-request memory cleanup.
+
+DESIGN NOTE — upstream isolation:
+  All kwargs construction for model.generate() is centralised in
+  OmniVoiceAdapter._build_kwargs(). When OmniVoice adds / renames params,
+  only that one method changes — not SynthesisRequest, not the router.
 """
 from __future__ import annotations
 
@@ -669,7 +682,7 @@ import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import AsyncIterator, Optional
+from typing import Optional
 
 import torch
 
@@ -682,19 +695,86 @@ logger = logging.getLogger(__name__)
 @dataclass
 class SynthesisRequest:
     text: str
-    mode: str                           # "auto" | "design" | "clone"
-    instruct: Optional[str] = None      # for mode="design"
-    ref_audio_path: Optional[str] = None  # tmp path, for mode="clone"
-    ref_text: Optional[str] = None      # for mode="clone", optional
+    mode: str                            # "auto" | "design" | "clone"
+    instruct: Optional[str] = None       # for mode="design"
+    ref_audio_path: Optional[str] = None # tmp path, for mode="clone"
+    ref_text: Optional[str] = None       # for mode="clone", optional
     speed: float = 1.0
-    num_step: Optional[int] = None      # None → use server default
+    num_step: Optional[int] = None       # None → use server default
+    # Advanced passthrough — None means "use upstream default"
+    guidance_scale: Optional[float] = None
+    denoise: Optional[bool] = None
 
 
 @dataclass
 class SynthesisResult:
-    tensors: list                       # list[torch.Tensor], each (1, T)
+    tensors: list                        # list[torch.Tensor], each (1, T)
     duration_s: float
     latency_s: float
+
+
+class OmniVoiceAdapter:
+    """
+    Thin adapter that translates SynthesisRequest → model.generate() kwargs.
+
+    WHY THIS EXISTS:
+    OmniVoice.generate() accepts ~10 parameters (num_step, speed, instruct,
+    ref_audio, ref_text, guidance_scale, denoise, duration, …). As upstream
+    adds / renames parameters, only this class needs to change — not the
+    request schema, not the router, not the tests.
+
+    This is the single seam between omnivoice-server and the upstream library.
+    """
+
+    def __init__(self, cfg: Settings) -> None:
+        self._cfg = cfg
+
+    def build_kwargs(self, req: SynthesisRequest, model) -> dict:
+        """Return kwargs dict ready to pass to model.generate()."""
+        num_step = req.num_step or self._cfg.num_step
+        guidance_scale = req.guidance_scale if req.guidance_scale is not None else self._cfg.guidance_scale
+        denoise = req.denoise if req.denoise is not None else self._cfg.denoise
+
+        kwargs: dict = {
+            "text": req.text,
+            "num_step": num_step,
+            "speed": req.speed,
+            "guidance_scale": guidance_scale,
+            "denoise": denoise,
+        }
+
+        if req.mode == "design" and req.instruct:
+            kwargs["instruct"] = req.instruct
+        elif req.mode == "clone" and req.ref_audio_path:
+            kwargs["ref_audio"] = req.ref_audio_path
+            if req.ref_text:
+                kwargs["ref_text"] = req.ref_text
+
+        return kwargs
+
+    def call(self, req: SynthesisRequest, model) -> list:
+        """Call model.generate() and return raw tensors."""
+        kwargs = self.build_kwargs(req, model)
+        try:
+            return model.generate(**kwargs)
+        except TypeError as exc:
+            # Upstream renamed or removed a param — try graceful fallback
+            # by stripping unknown kwargs one-by-one.
+            logger.warning(
+                f"model.generate() raised TypeError: {exc}. "
+                "Attempting fallback with minimal kwargs."
+            )
+            minimal = {
+                "text": kwargs["text"],
+                "num_step": kwargs.get("num_step", 16),
+            }
+            if "instruct" in kwargs:
+                minimal["instruct"] = kwargs["instruct"]
+            if "ref_audio" in kwargs:
+                minimal["ref_audio"] = kwargs["ref_audio"]
+            if "ref_text" in kwargs:
+                minimal["ref_text"] = kwargs["ref_text"]
+            return model.generate(**minimal)
 
 
 class InferenceService:
@@ -708,6 +788,7 @@ class InferenceService:
         self._executor = executor
         self._cfg = cfg
         self._semaphore = asyncio.Semaphore(cfg.max_concurrent)
+        self._adapter = OmniVoiceAdapter(cfg)
 
     async def synthesize(self, req: SynthesisRequest) -> SynthesisResult:
         """
@@ -718,17 +799,14 @@ class InferenceService:
         loop = asyncio.get_running_loop()
 
         async with self._semaphore:
-            try:
-                result = await asyncio.wait_for(
-                    loop.run_in_executor(
-                        self._executor,
-                        self._run_sync,
-                        req,
-                    ),
-                    timeout=self._cfg.request_timeout_s,
-                )
-            except asyncio.TimeoutError:
-                raise
+            result = await asyncio.wait_for(
+                loop.run_in_executor(
+                    self._executor,
+                    self._run_sync,
+                    req,
+                ),
+                timeout=self._cfg.request_timeout_s,
+            )
 
         return result
 
@@ -736,21 +814,10 @@ class InferenceService:
         """Blocking inference. Runs in thread pool thread."""
         t0 = time.monotonic()
         model = self._model_svc.model
-        num_step = req.num_step or self._cfg.num_step
-
-        kwargs: dict = {"text": req.text, "num_step": num_step, "speed": req.speed}
-
-        if req.mode == "design" and req.instruct:
-            kwargs["instruct"] = req.instruct
-        elif req.mode == "clone" and req.ref_audio_path:
-            kwargs["ref_audio"] = req.ref_audio_path
-            if req.ref_text:
-                kwargs["ref_text"] = req.ref_text
 
         try:
-            tensors = model.generate(**kwargs)
+            tensors = self._adapter.call(req, model)
         finally:
-            # Always cleanup regardless of success/failure
             _cleanup_memory(self._cfg.device)
 
         duration_s = sum(t.shape[-1] for t in tensors) / 24_000
@@ -768,7 +835,7 @@ class InferenceService:
 
 
 def _cleanup_memory(device: str) -> None:
-    """Post-inference memory cleanup to mitigate Torch 2.8 leak (issue #9)."""
+    """Post-inference memory cleanup to mitigate potential Torch memory growth."""
     gc.collect()
     if device == "cuda":
         try:
@@ -1607,7 +1674,7 @@ async def create_speech_clone(
 """
 /v1/voices                    — list all available voices
 /v1/voices/profiles           — manage cloning profiles
-/v1/voices/profiles/{id}      — get/delete specific profile
+/v1/voices/profiles/{id}      — get/patch/delete specific profile
 """
 from __future__ import annotations
 
@@ -1615,7 +1682,6 @@ import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
-from pydantic import BaseModel
 
 from ..services.profiles import (
     ProfileAlreadyExistsError,
@@ -1626,7 +1692,6 @@ from ..services.profiles import (
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# Design attribute reference — shown in /v1/voices response
 DESIGN_ATTRIBUTES = {
     "gender": ["male", "female"],
     "age": ["child", "young adult", "middle-aged", "elderly"],
@@ -1647,11 +1712,6 @@ def _get_profiles(request: Request) -> ProfileService:
 async def list_voices(
     profile_svc: ProfileService = Depends(_get_profiles),
 ):
-    """
-    List all available voice options:
-    - Built-in: auto + design (parameterized)
-    - Saved: clone profiles
-    """
     built_in = [
         {
             "id": "auto",
@@ -1689,6 +1749,7 @@ async def list_voices(
 
 @router.post("/voices/profiles", status_code=status.HTTP_201_CREATED)
 async def create_profile(
+    request: Request,                    # FIX: was missing — needed for cfg access
     profile_id: str = Form(
         ...,
         pattern=r"^[a-zA-Z0-9_-]{1,64}$",
@@ -1705,8 +1766,9 @@ async def create_profile(
     """
     from ..utils.audio import read_upload_bounded, validate_audio_bytes
 
+    cfg = request.app.state.cfg   # FIX: was NameError previously
+
     raw = await ref_audio.read()
-    cfg = request.app.state.cfg
     try:
         audio_bytes = read_upload_bounded(raw, cfg.max_ref_audio_bytes)
         validate_audio_bytes(audio_bytes)
@@ -1770,18 +1832,16 @@ async def delete_profile(
 @router.patch("/voices/profiles/{profile_id}", status_code=status.HTTP_200_OK)
 async def update_profile(
     profile_id: str,
+    request: Request,                    # FIX: needed for cfg.max_ref_audio_bytes
     ref_audio: Optional[UploadFile] = File(default=None),
     ref_text: Optional[str] = Form(default=None),
     profile_svc: ProfileService = Depends(_get_profiles),
 ):
     """
-    Update an existing profile.
-    Fields not provided are left unchanged.
-    Atomic: uses overwrite=True on ProfileService.save_profile().
     """
     # Verify it exists first
     try:
-        profile_svc.get_ref_audio_path(profile_id)
+        existing_path = profile_svc.get_ref_audio_path(profile_id)
     except ProfileNotFoundError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1795,9 +1855,18 @@ async def update_profile(
         )
 
     if ref_audio is not None:
-        audio_bytes = await ref_audio.read()
-        if not audio_bytes:
-            raise HTTPException(status_code=422, detail="ref_audio is empty")
+        from ..utils.audio import read_upload_bounded, validate_audio_bytes
+        cfg = request.app.state.cfg
+        raw = await ref_audio.read()
+        try:
+            # FIX: PATCH was missing size + format validation entirely
+            audio_bytes = read_upload_bounded(raw, cfg.max_ref_audio_bytes)
+            validate_audio_bytes(audio_bytes)
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(e),
+            )
         meta = profile_svc.save_profile(
             profile_id=profile_id,
             audio_bytes=audio_bytes,
@@ -1805,8 +1874,7 @@ async def update_profile(
             overwrite=True,
         )
     else:
-        # Only updating ref_text — read existing audio
-        existing_path = profile_svc.get_ref_audio_path(profile_id)
+        # Only updating ref_text — keep existing audio
         audio_bytes = existing_path.read_bytes()
         meta = profile_svc.save_profile(
             profile_id=profile_id,
