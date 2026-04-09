@@ -8,25 +8,26 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    UploadFile,
+    status,
+)
 
 from ..services.profiles import (
     ProfileAlreadyExistsError,
     ProfileNotFoundError,
     ProfileService,
 )
+from ..voice_presets import DEFAULT_DESIGN_INSTRUCTIONS, DESIGN_ATTRIBUTES, OPENAI_VOICE_PRESETS
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-
-DESIGN_ATTRIBUTES = {
-    "gender": ["male", "female"],
-    "age": ["child", "young adult", "middle-aged", "elderly"],
-    "pitch": ["very low", "low", "medium", "high", "very high"],
-    "style": ["whisper"],
-    "accent_en": ["American", "British", "Australian", "Indian", "Irish"],
-    "dialect_zh": ["四川话", "陕西话", "粤语", "闽南话"],
-}
 
 
 def _get_profiles(request: Request) -> ProfileService:
@@ -44,7 +45,10 @@ async def list_voices(
         {
             "id": "auto",
             "type": "auto",
-            "description": "Model selects voice automatically",
+            "description": (
+                "Fallback/default prompt when no instructions or recognized preset is provided: "
+                f"{DEFAULT_DESIGN_INSTRUCTIONS}"
+            ),
         },
         {
             "id": "design:<attributes>",
@@ -52,6 +56,13 @@ async def list_voices(
             "description": "Voice design via attributes. Example: 'design:female,british accent'",
             "attributes_reference": DESIGN_ATTRIBUTES,
         },
+    ] + [
+        {
+            "id": preset_name,
+            "type": "preset",
+            "description": f"OpenAI-compatible preset mapped to '{prompt}'",
+        }
+        for preset_name, prompt in sorted(OPENAI_VOICE_PRESETS.items())
     ]
 
     profiles = profile_svc.list_profiles()
@@ -91,7 +102,7 @@ async def create_profile(
 ):
     """
     Save a voice cloning profile.
-    After saving, use voice='clone:<profile_id>' in /v1/audio/speech.
+    Use /v1/audio/speech/clone for synthesis with reference audio uploads.
     """
     from ..utils.audio import read_upload_bounded, validate_audio_bytes
 
@@ -103,7 +114,7 @@ async def create_profile(
         validate_audio_bytes(audio_bytes)
     except ValueError as e:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=str(e),
         )
 
@@ -183,7 +194,7 @@ async def update_profile(
 
     if ref_audio is None and ref_text is None:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="Provide at least one of: ref_audio, ref_text",
         )
 
@@ -198,7 +209,7 @@ async def update_profile(
             validate_audio_bytes(audio_bytes)
         except ValueError as e:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail=str(e),
             )
         meta = profile_svc.save_profile(

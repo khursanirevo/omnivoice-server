@@ -21,15 +21,166 @@ def test_speech_auto_returns_wav(client):
 
 
 def test_speech_design_voice(client):
-    """Design voice with attributes."""
+    """voice field should be ignored for /v1/audio/speech."""
     resp = client.post(
         "/v1/audio/speech",
         json={
             "input": "Hello",
             "voice": "design:female,british accent",
+            "response_format": "pcm",
         },
     )
     assert resp.status_code == 200
+    req = client.app.state.inference_svc.synthesize.await_args.args[0]
+    assert req.mode == "design"
+    assert req.instruct == "male, middle-aged, moderate pitch, british accent"
+
+
+def test_speech_auto_uses_default_design_prompt(client):
+    """auto should resolve to the server's default design prompt."""
+    resp = client.post(
+        "/v1/audio/speech",
+        json={
+            "input": "Hello",
+            "voice": "auto",
+            "response_format": "pcm",
+        },
+    )
+    assert resp.status_code == 200
+    req = client.app.state.inference_svc.synthesize.await_args.args[0]
+    assert req.mode == "design"
+    assert req.instruct == "male, middle-aged, moderate pitch, british accent"
+
+
+def test_speech_openai_voice_preset_maps_to_design_prompt(client):
+    """Recognized voice names should map to local design presets."""
+    resp = client.post(
+        "/v1/audio/speech",
+        json={
+            "input": "Hello",
+            "voice": "alloy",
+            "response_format": "pcm",
+        },
+    )
+    assert resp.status_code == 200
+    req = client.app.state.inference_svc.synthesize.await_args.args[0]
+    assert req.mode == "design"
+    assert req.instruct == "female, young adult, moderate pitch, american accent"
+
+
+def test_speech_speaker_field_maps_to_design_prompt(client):
+    """speaker should work as an alias for preset selection."""
+    resp = client.post(
+        "/v1/audio/speech",
+        json={
+            "input": "Hello",
+            "speaker": "onyx",
+            "response_format": "pcm",
+        },
+    )
+    assert resp.status_code == 200
+    req = client.app.state.inference_svc.synthesize.await_args.args[0]
+    assert req.mode == "design"
+    assert req.instruct == "male, middle-aged, very low pitch, british accent"
+
+
+def test_speech_default_voice_uses_default_design_prompt(client):
+    """Omitting voice should use the same default design prompt."""
+    resp = client.post(
+        "/v1/audio/speech",
+        json={
+            "input": "Hello",
+            "response_format": "pcm",
+        },
+    )
+    assert resp.status_code == 200
+    req = client.app.state.inference_svc.synthesize.await_args.args[0]
+    assert req.mode == "design"
+    assert req.instruct == "male, middle-aged, moderate pitch, british accent"
+
+
+def test_speech_design_instructions_field(client):
+    """Explicit instructions should drive design mode."""
+    resp = client.post(
+        "/v1/audio/speech",
+        json={
+            "input": "Hello",
+            "voice": "auto",
+            "instructions": "female,british accent",
+            "response_format": "pcm",
+        },
+    )
+    assert resp.status_code == 200
+    req = client.app.state.inference_svc.synthesize.await_args.args[0]
+    assert req.mode == "design"
+    assert req.instruct == "female,british accent"
+
+
+def test_speech_instructions_override_voice_design_shorthand(client):
+    """instructions should take precedence over voice design shorthand."""
+    resp = client.post(
+        "/v1/audio/speech",
+        json={
+            "input": "Hello",
+            "voice": "design:male,deep voice",
+            "instructions": "female,british accent",
+            "response_format": "pcm",
+        },
+    )
+    assert resp.status_code == 200
+    req = client.app.state.inference_svc.synthesize.await_args.args[0]
+    assert req.mode == "design"
+    assert req.instruct == "female,british accent"
+
+
+def test_speech_ignores_clone_voice_when_instructions_missing(client):
+    """clone:* in the voice field should be ignored by /v1/audio/speech."""
+    resp = client.post(
+        "/v1/audio/speech",
+        json={
+            "input": "Hello",
+            "voice": "clone:nonexistent",
+            "response_format": "pcm",
+        },
+    )
+    assert resp.status_code == 200
+    req = client.app.state.inference_svc.synthesize.await_args.args[0]
+    assert req.mode == "design"
+    assert req.instruct == "male, middle-aged, moderate pitch, british accent"
+
+
+def test_speech_ignores_voice_when_instructions_present(client):
+    """instructions should be used even if voice contains an OpenAI voice name."""
+    resp = client.post(
+        "/v1/audio/speech",
+        json={
+            "input": "Hello",
+            "voice": "alloy",
+            "instructions": "female,british accent",
+            "response_format": "pcm",
+        },
+    )
+    assert resp.status_code == 200
+    req = client.app.state.inference_svc.synthesize.await_args.args[0]
+    assert req.mode == "design"
+    assert req.instruct == "female,british accent"
+
+
+def test_speech_speaker_takes_precedence_over_voice_preset(client):
+    """speaker should win when both preset selectors are provided."""
+    resp = client.post(
+        "/v1/audio/speech",
+        json={
+            "input": "Hello",
+            "voice": "alloy",
+            "speaker": "cedar",
+            "response_format": "pcm",
+        },
+    )
+    assert resp.status_code == 200
+    req = client.app.state.inference_svc.synthesize.await_args.args[0]
+    assert req.mode == "design"
+    assert req.instruct == "male, middle-aged, low pitch, american accent"
 
 
 def test_speech_invalid_text_empty(client):
@@ -44,16 +195,20 @@ def test_speech_invalid_text_empty(client):
     assert resp.status_code == 422
 
 
-def test_speech_clone_unknown_profile(client):
-    """Unknown profile returns 404."""
+def test_speech_clone_unknown_profile_ignored(client):
+    """clone:* values are ignored by /v1/audio/speech unless cloning endpoint is used."""
     resp = client.post(
         "/v1/audio/speech",
         json={
             "input": "Hello",
             "voice": "clone:nonexistent",
+            "response_format": "pcm",
         },
     )
-    assert resp.status_code == 404
+    assert resp.status_code == 200
+    req = client.app.state.inference_svc.synthesize.await_args.args[0]
+    assert req.mode == "design"
+    assert req.instruct == "male, middle-aged, moderate pitch, british accent"
 
 
 def test_speech_openai_model_names_accepted(client):
@@ -163,5 +318,3 @@ def test_speech_custom_class_temperature(client):
         },
     )
     assert resp.status_code == 200
-
-
