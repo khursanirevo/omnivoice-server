@@ -6,6 +6,7 @@ All shared state lives on app.state — no module-level globals.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -16,7 +17,7 @@ from fastapi.responses import JSONResponse
 
 from .config import Settings
 from .routers import health, models, speech, voices
-from .services.inference import InferenceService
+from .services.inference import InferenceService, SynthesisRequest
 from .services.metrics import MetricsService
 from .services.model import ModelService
 from .services.profiles import ProfileService
@@ -27,46 +28,72 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     cfg: Settings = app.state.cfg
-
-    # ── Startup ──────────────────────────────────────────────────────────────
-    t0 = time.monotonic()
-    logger.info("omnivoice-server starting up...")
-    logger.info(
-        f"  device={cfg.device}  num_step={cfg.num_step}  max_concurrent={cfg.max_concurrent}"
-    )
+    app.state.start_time = time.time()
+    app.state.metrics_svc = MetricsService()
 
     cfg.profile_dir.mkdir(parents=True, exist_ok=True)
-
-    model_svc = ModelService(cfg)
-    await model_svc.load()
-    app.state.model_svc = model_svc
-
-    executor = ThreadPoolExecutor(
-        max_workers=cfg.max_concurrent,
-        thread_name_prefix="omnivoice-infer",
-    )
-    app.state.inference_svc = InferenceService(
-        model_svc=model_svc,
-        executor=executor,
-        cfg=cfg,
-    )
-
     app.state.profile_svc = ProfileService(profile_dir=cfg.profile_dir)
-    app.state.metrics_svc = MetricsService()
-    app.state.start_time = time.monotonic()
 
-    elapsed = time.monotonic() - t0
-    logger.info(f"Startup complete in {elapsed:.1f}s. Listening on http://{cfg.host}:{cfg.port}")
+    if cfg.workers == 1:
+        # Single-worker mode: load model here, use ThreadPoolExecutor
+        model_svc = ModelService(cfg)
+        app.state.model_svc = model_svc
+        executor = ThreadPoolExecutor(max_workers=cfg.max_concurrent)
+        app.state.executor = executor
+        app.state.inference_svc = InferenceService(model_svc, cfg, executor=executor)
 
-    # Announce readiness to stdout (for process supervisors/callers to detect port)
-    print(f"OMNIVOICE_READY host={cfg.host} port={cfg.port}", flush=True)
+        await model_svc.load()
+    else:
+        # Multi-worker mode.
+        # IMPORTANT SAFETY INVARIANT: This code path only runs inside forked worker
+        # processes. The parent process never calls create_app() or runs this lifespan —
+        # it goes directly to worker_mgr.monitor() in cli.py. CUDA initialization here
+        # is safe because it happens AFTER fork, in an isolated child process.
+        model_svc = ModelService(cfg)
+        app.state.model_svc = model_svc
+        app.state.executor = None
+        app.state.inference_svc = InferenceService(model_svc, cfg, executor=None)
+
+        await model_svc.load()
+
+        # Slot 0 worker: measure peak VRAM and write to temp file for parent
+        worker_slot = int(os.environ.get("OMNIVOICE_WORKER_SLOT", "-1"))
+        if worker_slot == 0 and cfg.device == "cuda":
+            import json
+
+            import torch
+
+            peak_bytes = torch.cuda.max_memory_allocated()
+            peak_mb = peak_bytes / 1024 / 1024
+            free_bytes, total_bytes = torch.cuda.mem_get_info()
+
+            vram_file = "/tmp/omnivoice_vram_measurement.json"
+
+            with open(vram_file, "w") as f:
+                json.dump({
+                    "peak_vram_mb": round(peak_mb, 2),
+                    "total_vram_mb": round(total_bytes / 1024 / 1024, 2),
+                }, f)
+            logger.info("VRAM measurement written: %.0f MB -> %s", peak_mb, vram_file)
+
+    # Warmup: prime CUDA kernels, memory allocators, and torch JIT caches
+    # so the first real request isn't garbage.
+    if app.state.model_svc.is_loaded:
+        try:
+            warmup_text = "Warmup inference for CUDA kernel compilation."
+            for i in range(5):
+                await app.state.inference_svc.synthesize(
+                    SynthesisRequest(text=warmup_text, mode="auto")
+                )
+            logger.info("Warmup complete (5 inference calls)")
+        except Exception:
+            logger.debug("Warmup skipped (model not fully initialized)")
 
     yield
 
-    # ── Shutdown ──────────────────────────────────────────────────────────────
-    logger.info("Shutting down...")
-    executor.shutdown(wait=False)
-    logger.info("Done.")
+    # Shutdown
+    if getattr(app.state, "executor", None):
+        app.state.executor.shutdown(wait=False)
 
 
 def _status_to_code(status_code: int) -> str:
