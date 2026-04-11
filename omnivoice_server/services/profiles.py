@@ -10,6 +10,7 @@ Profile structure on disk:
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import shutil
@@ -33,6 +34,19 @@ class ProfileAlreadyExistsError(Exception):
 class ProfileService:
     def __init__(self, profile_dir: Path) -> None:
         self._dir = profile_dir
+
+    def _acquire_lock(self, profile_id: str):
+        """Get file object for advisory lock. Caller must close it."""
+        lock_path = self._dir / f".lock-{profile_id}"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_file = open(lock_path, "w")  # noqa: SIM115
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        return lock_file
+
+    def _release_lock(self, lock_file):
+        """Release and close the lock file."""
+        fcntl.flock(lock_file, fcntl.LOCK_UN)
+        lock_file.close()
 
     def list_profiles(self) -> list[dict]:
         """Return list of profile metadata dicts."""
@@ -67,38 +81,46 @@ class ProfileService:
         Save a new profile. Raises ProfileAlreadyExistsError if exists and overwrite=False.
         Returns the saved metadata dict.
         """
-        profile_path = self._profile_path(profile_id)
-        if profile_path.exists() and not overwrite:
-            raise ProfileAlreadyExistsError(
-                f"Profile '{profile_id}' already exists. Use overwrite=true to replace."
+        lock = self._acquire_lock(profile_id)
+        try:
+            profile_path = self._profile_path(profile_id)
+            if profile_path.exists() and not overwrite:
+                raise ProfileAlreadyExistsError(
+                    f"Profile '{profile_id}' already exists. Use overwrite=true to replace."
+                )
+
+            profile_path.mkdir(parents=True, exist_ok=True)
+
+            # Write audio
+            audio_path = profile_path / PROFILE_AUDIO_FILE
+            audio_path.write_bytes(audio_bytes)
+
+            # Write metadata
+            now = datetime.now(timezone.utc).isoformat()
+            meta = {
+                "name": profile_id,
+                "ref_text": ref_text,
+                "created_at": now,
+            }
+            (profile_path / PROFILE_META_FILE).write_text(
+                json.dumps(meta, ensure_ascii=False, indent=2)
             )
 
-        profile_path.mkdir(parents=True, exist_ok=True)
-
-        # Write audio
-        audio_path = profile_path / PROFILE_AUDIO_FILE
-        audio_path.write_bytes(audio_bytes)
-
-        # Write metadata
-        now = datetime.now(timezone.utc).isoformat()
-        meta = {
-            "name": profile_id,
-            "ref_text": ref_text,
-            "created_at": now,
-        }
-        (profile_path / PROFILE_META_FILE).write_text(
-            json.dumps(meta, ensure_ascii=False, indent=2)
-        )
-
-        logger.info(f"Saved profile '{profile_id}'")
-        return {"profile_id": profile_id, **meta}
+            logger.info(f"Saved profile '{profile_id}'")
+            return {"profile_id": profile_id, **meta}
+        finally:
+            self._release_lock(lock)
 
     def delete_profile(self, profile_id: str) -> None:
-        profile_path = self._profile_path(profile_id)
-        if not profile_path.exists():
-            raise ProfileNotFoundError(f"Profile '{profile_id}' not found")
-        shutil.rmtree(profile_path)
-        logger.info(f"Deleted profile '{profile_id}'")
+        lock = self._acquire_lock(profile_id)
+        try:
+            profile_path = self._profile_path(profile_id)
+            if not profile_path.exists():
+                raise ProfileNotFoundError(f"Profile '{profile_id}' not found")
+            shutil.rmtree(profile_path)
+            logger.info(f"Deleted profile '{profile_id}'")
+        finally:
+            self._release_lock(lock)
 
     def _profile_path(self, profile_id: str) -> Path:
         # Sanitize: only allow alphanumeric + dash + underscore
