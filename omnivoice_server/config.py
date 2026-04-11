@@ -84,6 +84,25 @@ class Settings(BaseSettings):
         le=16,
         description="Max simultaneous inference calls",
     )
+    workers: int = Field(
+        default=1,
+        ge=1,
+        le=16,
+        description=(
+            "Number of worker processes. "
+            "Default=1 (single-worker, opt-in for multi-worker)."
+        ),
+    )
+    mps_enabled: Literal["auto", "true", "false"] = Field(
+        default="auto",
+        description="MPS mode: auto=enable when cuda+workers>1, true=force, false=disable",
+    )
+    mps_active_thread_percentage: int = Field(
+        default=100,
+        ge=1,
+        le=100,
+        description="GPU compute percentage for MPS (1-100)",
+    )
     request_timeout_s: int = Field(
         default=120,
         description="Max seconds per synthesis request before 504",
@@ -119,6 +138,16 @@ class Settings(BaseSettings):
         le=200,
         description="Max upload size for ref_audio files in megabytes.",
     )
+
+    @property
+    def mps_should_enable(self) -> bool:
+        """Resolve auto/true/false to boolean."""
+        if self.mps_enabled == "true":
+            return True
+        if self.mps_enabled == "false":
+            return False
+        # auto: enable only when cuda + multi-worker
+        return self.device == "cuda" and self.workers > 1
 
     @property
     def max_ref_audio_bytes(self) -> int:
