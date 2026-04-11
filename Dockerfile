@@ -1,37 +1,35 @@
-# Multi-stage build for omnivoice-server
-FROM python:3.10-slim AS builder
+# --- Builder stage: install Python dependencies with CUDA toolkit ---
+FROM pytorch/pytorch:2.3.0-cuda12.4-cudnn9-devel AS builder
 
 WORKDIR /build
-
-# Install build dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
 
 # Copy project files
 COPY pyproject.toml README.md ./
 COPY omnivoice_server ./omnivoice_server
 
-# Install PyTorch CPU (smaller image, works everywhere)
-RUN pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cpu
-
-# Install the package
+# Install the package (PyTorch CUDA is already in the base image)
 RUN pip install --no-cache-dir .
 
-# Runtime stage
-FROM python:3.10-slim
+# --- Runtime stage: slim image with CUDA runtime libs + MPS control binary ---
+FROM pytorch/pytorch:2.3.0-cuda12.4-cudnn9-runtime
 
 WORKDIR /app
 
-# Install runtime dependencies
+# Install runtime dependencies (libsndfile1 for audio, curl for healthcheck)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libsndfile1 \
-    libgomp1 \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy installed packages from builder
-COPY --from=builder /usr/local/lib/python3.10/site-packages /usr/local/lib/python3.10/site-packages
-COPY --from=builder /usr/local/bin/omnivoice-server /usr/local/bin/omnivoice-server
+# Copy installed Python packages from builder
+COPY --from=builder /opt/conda/lib/python3.10/site-packages /opt/conda/lib/python3.10/site-packages
+COPY --from=builder /opt/conda/bin/omnivoice-server /opt/conda/bin/omnivoice-server
+
+# Copy the app source (needed for python -m execution)
+COPY --from=builder /build/omnivoice_server ./omnivoice_server
+
+# Copy nvidia-cuda-mps-control from the devel stage (not present in runtime images)
+COPY --from=builder /usr/local/cuda/bin/nvidia-cuda-mps-control /usr/local/cuda/bin/nvidia-cuda-mps-control
 
 # Create profile directory
 RUN mkdir -p /app/profiles
@@ -39,9 +37,9 @@ RUN mkdir -p /app/profiles
 # Expose server port
 EXPOSE 8880
 
-# Health check
+# Health check using curl
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8880/health')" || exit 1
+    CMD curl -f http://localhost:8880/health || exit 1
 
 # Run server
-CMD ["omnivoice-server", "--host", "0.0.0.0", "--port", "8880", "--profile-dir", "/app/profiles"]
+CMD ["python", "-m", "omnivoice_server"]
