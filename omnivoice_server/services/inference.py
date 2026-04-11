@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import hashlib
 import logging
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -66,6 +68,8 @@ class OmniVoiceAdapter:
 
     def __init__(self, cfg: Settings) -> None:
         self._cfg = cfg
+        self._clone_prompt_cache: dict[str, object] = {}
+        self._cache_lock = threading.Lock()
 
     def build_kwargs(self, req: SynthesisRequest, model) -> dict:
         """Return kwargs dict ready to pass to model.generate()."""
@@ -108,11 +112,37 @@ class OmniVoiceAdapter:
         if req.mode == "design" and req.instruct:
             kwargs["instruct"] = req.instruct
         elif req.mode == "clone" and req.ref_audio_path:
-            kwargs["ref_audio"] = req.ref_audio_path
-            if req.ref_text:
-                kwargs["ref_text"] = req.ref_text
+            prompt = self._get_or_create_clone_prompt(req, model)
+            kwargs["voice_clone_prompt"] = prompt
 
         return kwargs
+
+    def _get_or_create_clone_prompt(self, req: SynthesisRequest, model):
+        """Cache voice_clone_prompt keyed by ref audio file content hash."""
+        import pathlib
+
+        audio_bytes = pathlib.Path(req.ref_audio_path).read_bytes()
+        cache_key = hashlib.sha256(audio_bytes).hexdigest()
+
+        with self._cache_lock:
+            if cache_key in self._clone_prompt_cache:
+                logger.debug("Reusing cached voice clone prompt")
+                return self._clone_prompt_cache[cache_key]
+
+        logger.info("Encoding voice clone prompt (new ref audio, %d bytes)", len(audio_bytes))
+        prompt = model.create_voice_clone_prompt(
+            req.ref_audio_path,
+            ref_text=req.ref_text,
+        )
+
+        with self._cache_lock:
+            self._clone_prompt_cache[cache_key] = prompt
+            # Evict oldest entries if cache grows too large
+            if len(self._clone_prompt_cache) > 32:
+                oldest_key = next(iter(self._clone_prompt_cache))
+                del self._clone_prompt_cache[oldest_key]
+
+        return prompt
 
     def call(self, req: SynthesisRequest, model) -> list[torch.Tensor]:
         """Call model.generate() and return raw tensors."""
@@ -132,10 +162,8 @@ class OmniVoiceAdapter:
             }
             if "instruct" in kwargs:
                 minimal["instruct"] = kwargs["instruct"]
-            if "ref_audio" in kwargs:
-                minimal["ref_audio"] = kwargs["ref_audio"]
-            if "ref_text" in kwargs:
-                minimal["ref_text"] = kwargs["ref_text"]
+            if "voice_clone_prompt" in kwargs:
+                minimal["voice_clone_prompt"] = kwargs["voice_clone_prompt"]
             return model.generate(**minimal)
 
 
@@ -143,34 +171,40 @@ class InferenceService:
     def __init__(
         self,
         model_svc: ModelService,
-        executor: ThreadPoolExecutor,
         cfg: Settings,
+        executor: ThreadPoolExecutor | None = None,
     ) -> None:
         self._model_svc = model_svc
-        self._executor = executor
         self._cfg = cfg
-        self._semaphore = asyncio.Semaphore(cfg.max_concurrent)
+        self._executor = executor
+        self._semaphore = (
+            asyncio.Semaphore(cfg.max_concurrent) if executor else None
+        )
         self._adapter = OmniVoiceAdapter(cfg)
 
     async def synthesize(self, req: SynthesisRequest) -> SynthesisResult:
-        """
-        Run synthesis in thread pool.
-        Blocks at semaphore if MAX_CONCURRENT already running.
-        Raises asyncio.TimeoutError if exceeds request_timeout_s.
-        """
+        if self._executor is not None:
+            return await self._synthesize_threaded(req)
+        return await self._synthesize_direct(req)
+
+    async def _synthesize_direct(self, req: SynthesisRequest) -> SynthesisResult:
+        """Direct inference (multi-worker mode). Each worker handles one request at a time."""
         loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._run_sync, req)
 
+    async def _synthesize_threaded(self, req: SynthesisRequest) -> SynthesisResult:
+        """Threaded inference with semaphore (single-worker fallback mode)."""
         async with self._semaphore:
-            result = await asyncio.wait_for(
-                loop.run_in_executor(
-                    self._executor,
-                    self._run_sync,
-                    req,
-                ),
-                timeout=self._cfg.request_timeout_s,
-            )
-
-        return result
+            try:
+                result = await asyncio.wait_for(
+                    asyncio.get_running_loop().run_in_executor(
+                        self._executor, self._run_sync, req
+                    ),
+                    timeout=self._cfg.request_timeout_s,
+                )
+                return result
+            except asyncio.TimeoutError:
+                raise
 
     def _run_sync(self, req: SynthesisRequest) -> SynthesisResult:
         """Blocking inference. Runs in thread pool thread."""
@@ -180,7 +214,8 @@ class InferenceService:
         try:
             tensors = self._adapter.call(req, model)
         finally:
-            _cleanup_memory(self._cfg.device)
+            if self._executor is not None:
+                _cleanup_memory(self._cfg.device)
 
         duration_s = sum(t.shape[-1] for t in tensors) / 24_000
         latency_s = time.monotonic() - t0
