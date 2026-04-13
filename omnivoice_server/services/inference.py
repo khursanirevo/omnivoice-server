@@ -182,10 +182,142 @@ class InferenceService:
         )
         self._adapter = OmniVoiceAdapter(cfg)
 
+        # Request batching state
+        self._batch_queue: asyncio.Queue[tuple[SynthesisRequest, asyncio.Future]] | None = None
+        self._batch_task: asyncio.Task | None = None
+
+    def start_batch_scheduler(self) -> None:
+        """Start the batch scheduler loop (call after event loop starts)."""
+        if not self._cfg.batch_enabled:
+            return
+        self._batch_queue = asyncio.Queue()
+        self._batch_task = asyncio.ensure_future(self._batch_scheduler_loop())
+        logger.info(
+            "Batch scheduler started (max_size=%d, timeout=%dms)",
+            self._cfg.batch_max_size, self._cfg.batch_timeout_ms,
+        )
+
+    def stop_batch_scheduler(self) -> None:
+        """Stop the batch scheduler."""
+        if self._batch_task is not None:
+            self._batch_task.cancel()
+            self._batch_task = None
+
     async def synthesize(self, req: SynthesisRequest) -> SynthesisResult:
+        if self._cfg.batch_enabled and self._batch_queue is not None:
+            return await self._synthesize_batched(req)
         if self._executor is not None:
             return await self._synthesize_threaded(req)
         return await self._synthesize_direct(req)
+
+    async def _synthesize_batched(self, req: SynthesisRequest) -> SynthesisResult:
+        """Submit request to batch queue and wait for result."""
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        await self._batch_queue.put((req, future))
+        return await future
+
+    async def _batch_scheduler_loop(self) -> None:
+        """Background loop that collects and processes batches."""
+        while True:
+            try:
+                batch: list[tuple[SynthesisRequest, asyncio.Future]] = []
+
+                # Wait for first request
+                first = await self._batch_queue.get()
+                batch.append(first)
+
+                # Collect more until timeout or max size
+                deadline = asyncio.get_event_loop().time() + self._cfg.batch_timeout_ms / 1000
+                while len(batch) < self._cfg.batch_max_size:
+                    remaining = deadline - asyncio.get_event_loop().time()
+                    if remaining <= 0:
+                        break
+                    try:
+                        item = await asyncio.wait_for(
+                            self._batch_queue.get(), timeout=remaining
+                        )
+                        batch.append(item)
+                    except asyncio.TimeoutError:
+                        break
+
+                # Process batch
+                if len(batch) == 1:
+                    # Single request — process directly
+                    req, future = batch[0]
+                    try:
+                        result = await self._synthesize_direct(req)
+                        future.set_result(result)
+                    except Exception as e:
+                        future.set_exception(e)
+                else:
+                    # Batch multiple requests
+                    await self._process_batch(batch)
+
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                logger.exception("Batch scheduler error")
+                await asyncio.sleep(0.1)
+
+    async def _process_batch(
+        self, batch: list[tuple[SynthesisRequest, asyncio.Future]]
+    ) -> None:
+        """Process a batch of requests together."""
+        texts = [req.text for req, _ in batch]
+        first_req = batch[0][0]
+
+        # Build a single batched request using the first request's params
+        batch_req = SynthesisRequest(
+            text=texts,  # type: ignore  # list[str] is valid for model.generate()
+            mode=first_req.mode,
+            instruct=first_req.instruct,
+            ref_audio_path=first_req.ref_audio_path,
+            ref_text=first_req.ref_text,
+            speed=first_req.speed,
+            num_step=first_req.num_step,
+            guidance_scale=first_req.guidance_scale,
+            denoise=first_req.denoise,
+            t_shift=first_req.t_shift,
+            position_temperature=first_req.position_temperature,
+            class_temperature=first_req.class_temperature,
+            duration=first_req.duration,
+        )
+
+        try:
+            result = await self._synthesize_direct(batch_req)
+
+            # Split results — _synthesize_direct with list[str] returns
+            # a result with all audio tensors concatenated. We need to
+            # split per request. For simplicity, if the model returned
+            # N outputs matching N inputs, distribute them.
+            if len(batch) == len(result.tensors):
+                for i, (req, future) in enumerate(batch):
+                    tensor = result.tensors[i]
+                    dur = tensor.shape[-1] / 24_000
+                    future.set_result(SynthesisResult(
+                        tensors=[tensor],
+                        duration_s=dur,
+                        latency_s=result.latency_s,
+                    ))
+            else:
+                # Fallback: give all tensors to first, errors to rest
+                logger.warning(
+                    "Batch result count mismatch: %d requests, %d outputs",
+                    len(batch), len(result.tensors),
+                )
+                for _, future in batch:
+                    # Re-process individually
+                    try:
+                        r = await self._synthesize_direct(batch[0][0])
+                        future.set_result(r)
+                    except Exception as e:
+                        future.set_exception(e)
+
+        except Exception as e:
+            for _, future in batch:
+                if not future.done():
+                    future.set_exception(e)
 
     async def _synthesize_direct(self, req: SynthesisRequest) -> SynthesisResult:
         """Direct inference (multi-worker mode). Each worker handles one request at a time."""

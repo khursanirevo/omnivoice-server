@@ -143,6 +143,27 @@ class Settings(BaseSettings):
         description="Optional Bearer token. Empty = no auth.",
     )
 
+    # Batching
+    batch_enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable request batching: collect requests for batch_timeout_ms "
+            "and process them together in a single batched model call."
+        ),
+    )
+    batch_max_size: int = Field(
+        default=4,
+        ge=1,
+        le=16,
+        description="Maximum number of requests to batch together.",
+    )
+    batch_timeout_ms: int = Field(
+        default=50,
+        ge=1,
+        le=1000,
+        description="Max milliseconds to wait before processing a partial batch.",
+    )
+
     # Streaming
     stream_chunk_max_chars: int = Field(
         default=400,

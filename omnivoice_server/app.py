@@ -89,9 +89,15 @@ async def lifespan(app: FastAPI):
         except Exception:
             logger.debug("Warmup skipped (model not fully initialized)")
 
+    # Start batch scheduler if enabled
+    if hasattr(app.state.inference_svc, "start_batch_scheduler"):
+        app.state.inference_svc.start_batch_scheduler()
+
     yield
 
     # Shutdown
+    if hasattr(app.state.inference_svc, "stop_batch_scheduler"):
+        app.state.inference_svc.stop_batch_scheduler()
     if getattr(app.state, "executor", None):
         app.state.executor.shutdown(wait=False)
 
