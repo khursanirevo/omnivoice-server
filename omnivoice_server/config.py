@@ -38,7 +38,7 @@ class Settings(BaseSettings):
         description="Override HuggingFace model cache directory",
     )
     device: Literal["auto", "cuda", "mps", "cpu"] = "cpu"
-    num_step: int = Field(default=32, ge=1, le=64)  # Upstream default
+    num_step: int = Field(default=16, ge=1, le=64)  # Min 16 for acceptable quality
 
     # Optimization
     compile_mode: Literal["none", "default", "reduce-overhead", "max-autotune"] = Field(
