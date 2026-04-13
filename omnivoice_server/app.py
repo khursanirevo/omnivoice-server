@@ -84,8 +84,9 @@ async def lifespan(app: FastAPI):
         # Run GPU benchmark to find optimal batch size (blocking, run in executor)
         loop = asyncio.get_running_loop()
         model = app.state.model_svc.model
+        cache_dir = str(cfg.compile_cache_dir) if cfg.compile_cache_dir else None
         bench = await loop.run_in_executor(
-            None, find_optimal_batch_size, model, cfg.num_step,
+            None, find_optimal_batch_size, model, cfg.num_step, cache_dir,
         )
         app.state.gpu_benchmark = bench
         optimal_bs = bench["optimal_batch_size"]

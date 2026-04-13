@@ -1,16 +1,19 @@
 """
 Auto-benchmark: find optimal batch size and timeout for the current GPU.
 
-Tests increasing batch sizes, picks the one with the best throughput,
-and derives an optimal batch_timeout_ms from actual compute latency.
+First run on new hardware: benchmarks all batch sizes and saves a profile.
+Subsequent runs: loads cached profile (keyed by GPU + num_step).
 """
 
 from __future__ import annotations
 
 import gc
+import json
 import logging
+import os
 import statistics
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import torch
@@ -20,19 +23,37 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Batch sizes to test (skip 16 — known torch.compile recompilation spike)
+PROFILE_FILENAME = "gpu_benchmark_profile.json"
 BATCH_SIZES = [1, 2, 4, 8, 32, 64, 128]
 TEXT = "Benchmark test sentence for batch throughput measurement."
 
 
+# ── Helpers ──────────────────────────────────────────────────────────
+
+
+def _gpu_fingerprint() -> dict:
+    """Hardware fingerprint for cache invalidation."""
+    props = torch.cuda.get_device_properties(0)
+    return {
+        "gpu_name": props.name,
+        "compute_capability": f"{props.major}.{props.minor}",
+        "total_vram_mb": round(props.total_memory / 1024 / 1024),
+    }
+
+
+def _profile_path(cache_dir: str | None) -> Path | None:
+    """Where to store/load the benchmark profile."""
+    if cache_dir:
+        return Path(cache_dir) / PROFILE_FILENAME
+    return None
+
+
 def _get_vram_mb() -> int:
-    """Get current GPU VRAM usage in MB."""
     free, total = torch.cuda.mem_get_info()
     return round((total - free) / 1024 / 1024)
 
 
 def _run_batch(model: OmniVoice, batch_size: int, num_step: int) -> tuple[float, int]:
-    """Run one batched inference. Returns (elapsed_seconds, num_ok_outputs)."""
     texts = [TEXT] * batch_size
     t0 = time.perf_counter()
     with torch.no_grad():
@@ -44,71 +65,117 @@ def _run_batch(model: OmniVoice, batch_size: int, num_step: int) -> tuple[float,
 
 
 def _compute_optimal_timeout(single_latency_s: float) -> int:
-    """
-    Derive optimal batch_timeout_ms from single-request compute latency.
-
-    timeout = 50% of single request latency, clamped to [5, 100] ms.
-    - Fast GPU (30ms/request): ~15ms — low latency, still catches bursts
-    - Slow GPU (200ms/request): ~100ms — enough to build batches
-    """
     timeout_ms = round(single_latency_s * 0.5 * 1000)
     return max(5, min(100, timeout_ms))
 
 
 def _pick_optimal(results: list[dict]) -> dict:
-    """
-    Pick optimal batch size: best throughput, with tie-breaker for lower
-    latency (smaller batch).
-
-    Instead of stopping at first plateau (which misses real gains at
-    higher batch sizes), we pick the actual peak throughput. If two
-    batch sizes are within 3% throughput, prefer the smaller one
-    (lower per-request latency, less VRAM).
-    """
     if not results:
         return {"batch_size": 4, "throughput_req_s": 0.0}
 
-    # Find peak throughput
     best = max(results, key=lambda r: r["throughput_req_s"])
     best_tp = best["throughput_req_s"]
 
-    # Among all results within 3% of peak, pick the smallest batch
-    # (lower latency, less VRAM, same throughput)
+    # Among results within 3% of peak, pick smallest batch
     near_peak = [r for r in results if r["throughput_req_s"] >= best_tp * 0.97]
     chosen = min(near_peak, key=lambda r: r["batch_size"])
 
     if chosen["batch_size"] != best["batch_size"]:
         logger.info(
-            "Peak throughput at batch=%d (%.1f req/s), "
-            "but batch=%d gives 97%%+ of peak (%.1f req/s) with lower latency",
+            "Peak at batch=%d (%.1f req/s), batch=%d gives 97%%+ (%.1f req/s)",
             best["batch_size"], best_tp,
             chosen["batch_size"], chosen["throughput_req_s"],
         )
-
     return chosen
+
+
+# ── Cache ────────────────────────────────────────────────────────────
+
+
+def _load_cached_profile(
+    cache_dir: str | None,
+    num_step: int,
+) -> dict | None:
+    """Load cached benchmark profile if it matches current hardware."""
+    ppath = _profile_path(cache_dir)
+    if ppath is None or not ppath.exists():
+        return None
+
+    try:
+        with open(ppath) as f:
+            cached = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning("Failed to load benchmark profile: %s", e)
+        return None
+
+    # Validate fingerprint — re-run if hardware changed
+    current_fp = _gpu_fingerprint()
+    cached_fp = cached.get("fingerprint", {})
+    if cached_fp != current_fp:
+        logger.info(
+            "Hardware changed (was %s, now %s) — re-benchmarking",
+            cached_fp.get("gpu_name", "?"),
+            current_fp["gpu_name"],
+        )
+        return None
+
+    # Validate num_step matches
+    if cached.get("num_step") != num_step:
+        logger.info(
+            "num_step changed (%d -> %d) — re-benchmarking",
+            cached.get("num_step"), num_step,
+        )
+        return None
+
+    logger.info(
+        "Loaded cached benchmark profile: batch=%d, timeout=%dms, %.1f req/s",
+        cached["optimal_batch_size"],
+        cached["optimal_batch_timeout_ms"],
+        cached["optimal_throughput_req_s"],
+    )
+    return cached
+
+
+def _save_profile(profile: dict, cache_dir: str | None) -> None:
+    """Save benchmark profile to disk."""
+    ppath = _profile_path(cache_dir)
+    if ppath is None:
+        return
+
+    try:
+        os.makedirs(ppath.parent, exist_ok=True)
+        tmp = ppath.with_suffix(".tmp")
+        with open(tmp, "w") as f:
+            json.dump(profile, f, indent=2)
+        tmp.replace(ppath)
+        logger.info("Benchmark profile saved to %s", ppath)
+    except OSError as e:
+        logger.warning("Failed to save benchmark profile: %s", e)
+
+
+# ── Main ─────────────────────────────────────────────────────────────
 
 
 def find_optimal_batch_size(
     model: OmniVoice,
     num_step: int = 16,
+    cache_dir: str | None = None,
     bench_rounds: int = 3,
 ) -> dict:
     """
-    Benchmark increasing batch sizes and find the optimal configuration.
+    Find optimal batch config for this GPU.
 
-    Uses the production num_step for accurate results.
-
-    Returns dict with:
-        optimal_batch_size: int
-        optimal_batch_timeout_ms: int
-        throughput_req_s: float
-        results: list of {batch_size, latency_s, throughput_req_s, vram_mb}
+    Checks cache first. If no cached profile (or hardware changed),
+    runs the full benchmark and saves results.
     """
-    logger.info(
-        "Starting GPU auto-benchmark (num_step=%d)...", num_step,
-    )
+    # Try cache first
+    cached = _load_cached_profile(cache_dir, num_step)
+    if cached is not None:
+        return cached
 
-    # Warmup for each batch size (trigger compilation)
+    logger.info("Starting GPU auto-benchmark (num_step=%d)...", num_step)
+
+    # Warmup
     warmup_step = min(num_step, 4)
     for bs in [1, 2, 4, 8]:
         try:
@@ -116,7 +183,7 @@ def find_optimal_batch_size(
         except Exception as e:
             logger.warning("Warmup batch=%d failed: %s", bs, e)
 
-    # Benchmark each batch size with production num_step
+    # Benchmark
     results = []
     for bs in BATCH_SIZES:
         try:
@@ -167,15 +234,14 @@ def find_optimal_batch_size(
             "results": [],
         }
 
-    # Pick optimal: best throughput, prefer smaller batch within 3% of peak
     optimal = _pick_optimal(results)
-
-    # Derive optimal timeout from single-request latency
     single_latency = results[0]["latency_s"]
     timeout_ms = _compute_optimal_timeout(single_latency)
-
     vram_end = _get_vram_mb()
+
     summary = {
+        "fingerprint": _gpu_fingerprint(),
+        "num_step": num_step,
         "optimal_batch_size": optimal["batch_size"],
         "optimal_batch_timeout_ms": timeout_ms,
         "optimal_throughput_req_s": optimal["throughput_req_s"],
@@ -195,4 +261,8 @@ def find_optimal_batch_size(
         summary["vram_used_mb"],
         summary["vram_total_mb"],
     )
+
+    # Save for next startup
+    _save_profile(summary, cache_dir)
+
     return summary
