@@ -40,6 +40,23 @@ class Settings(BaseSettings):
     device: Literal["auto", "cuda", "mps", "cpu"] = "cpu"
     num_step: int = Field(default=32, ge=1, le=64)  # Upstream default
 
+    # Optimization
+    compile_mode: Literal["none", "default", "reduce-overhead", "max-autotune"] = Field(
+        default="none",
+        description=(
+            "torch.compile mode for LLM backbone. "
+            "'none'=disabled, 'max-autotune'=best perf but slow first compile."
+        ),
+    )
+    quantization: Literal["none", "fp8wo", "fp8dq", "int8wo", "int8dq"] = Field(
+        default="none",
+        description=(
+            "TorchAO quantization for LLM backbone. "
+            "fp8wo=FP8 weight-only, int8wo=INT8 weight-only. "
+            "Requires torchao package and FP8-capable GPU for fp8 options."
+        ),
+    )
+
     # Advanced generation params (passed through to OmniVoice.generate())
     # Expose the ones users are likely to tune; leave the rest at upstream defaults.
     guidance_scale: float = Field(

@@ -80,6 +80,10 @@ class ModelService:
             f"RAM: {ram_before:.0f}MB -> {ram_after:.0f}MB "
             f"(+{ram_after - ram_before:.0f}MB)"
         )
+
+        # Apply post-load optimizations
+        self._apply_optimizations()
+
         self._loaded = True
 
     def _dtype_candidates(self) -> list:
@@ -100,6 +104,50 @@ class ModelService:
     @property
     def is_loaded(self) -> bool:
         return self._loaded
+
+    def _apply_optimizations(self) -> None:
+        """Apply torch.compile and/or TorchAO quantization to the LLM backbone."""
+        if self._model is None:
+            return
+
+        # Quantization first (operates on raw weights)
+        if self.cfg.quantization != "none":
+            self._apply_quantization()
+
+        # Then torch.compile (works on quantized or normal model)
+        if self.cfg.compile_mode != "none":
+            self._apply_compile()
+
+    def _apply_quantization(self) -> None:
+        """Apply TorchAO quantization to the LLM backbone."""
+        from torchao.quantization import quantize_
+
+        configs = {
+            "fp8wo": "Float8WeightOnlyConfig",
+            "fp8dq": "Float8DynamicActivationFloat8WeightConfig",
+            "int8wo": "Int8WeightOnlyConfig",
+            "int8dq": "Int8DynamicActivationInt8WeightConfig",
+        }
+        import torchao.quantization as tq
+
+        cls_name = configs[self.cfg.quantization]
+        config_cls = getattr(tq, cls_name)
+        config = config_cls()
+
+        logger.info("Applying TorchAO quantization=%s to LLM backbone", self.cfg.quantization)
+        quantize_(self._model.llm, config=config)
+        logger.info("Quantization applied")
+
+    def _apply_compile(self) -> None:
+        """Apply torch.compile to the LLM backbone."""
+        import torch
+
+        logger.info(
+            "Applying torch.compile(mode=%s) to LLM backbone", self.cfg.compile_mode
+        )
+        compiled = torch.compile(self._model.llm, mode=self.cfg.compile_mode)
+        self._model.llm = compiled
+        logger.info("torch.compile applied (first inference will compile, then cached)")
 
 
 def _get_ram_mb() -> float:
