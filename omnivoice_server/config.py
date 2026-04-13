@@ -109,6 +109,15 @@ class Settings(BaseSettings):
         le=16,
         description="Max simultaneous inference calls",
     )
+    loudness_target_lufs: float | None = Field(
+        default=-16.0,
+        ge=-60.0,
+        le=0.0,
+        description=(
+            "Target loudness in LUFS for output normalization. "
+            "Set to null to disable. Default -16 LUFS (speech standard)."
+        ),
+    )
     workers: int = Field(
         default=1,
         ge=1,

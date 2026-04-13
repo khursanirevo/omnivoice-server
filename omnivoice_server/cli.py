@@ -88,6 +88,16 @@ def main() -> None:
 
     # Inference
     parser.add_argument(
+        "--loudness-target-lufs",
+        type=float,
+        default=None,
+        dest="loudness_target_lufs",
+        help=(
+            "Target loudness in LUFS for normalization "
+            "(env: OMNIVOICE_LOUDNESS_TARGET_LUFS)"
+        ),
+    )
+    parser.add_argument(
         "--max-concurrent",
         type=int,
         default=None,

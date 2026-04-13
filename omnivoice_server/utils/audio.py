@@ -15,6 +15,31 @@ import torchaudio
 SAMPLE_RATE = 24_000
 
 
+def normalize_loudness(
+    tensor: torch.Tensor,
+    target_lufs: float = -16.0,
+    sample_rate: int = SAMPLE_RATE,
+) -> torch.Tensor:
+    """Normalize audio tensor to target integrated LUFS via pyloudnorm."""
+    import numpy as np
+    import pyloudnorm as pyln
+
+    # (1, T) or (T,) → numpy (channels, samples)
+    audio = tensor.detach().cpu().float()
+    if audio.dim() == 1:
+        audio = audio.unsqueeze(0)
+    np_audio = audio.numpy()
+
+    meter = pyln.Meter(sample_rate)
+    current_lufs = meter.integrated_loudness(np_audio)
+
+    if not np.isfinite(current_lufs):
+        return tensor  # Silence or too short to measure
+
+    normalized = pyln.normalize.loudness(np_audio, current_lufs, target_lufs)
+    return torch.from_numpy(normalized).to(tensor.dtype)
+
+
 def tensor_to_wav_bytes(tensor: torch.Tensor) -> bytes:
     """
     Convert (1, T) float32 tensor to 16-bit PCM WAV bytes.

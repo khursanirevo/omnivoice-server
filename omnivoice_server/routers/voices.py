@@ -37,7 +37,28 @@ def _get_profiles(request: Request) -> ProfileService:
 # ── GET /v1/voices ───────────────────────────────────────────────────────────
 
 
-@router.get("/voices")
+@router.get(
+    "/voices",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "description": "List of available voices",
+                "content": {
+                    "application/json": {
+                        "example": {
+                            "voices": [
+                                {"id": "auto", "type": "auto"},
+                                {"id": "alloy", "type": "preset"},
+                                {"id": "clone:my_voice", "type": "clone"},
+                            ],
+                            "total": 3,
+                        }
+                    }
+                },
+            }
+        },
+    },
+)
 async def list_voices(
     profile_svc: ProfileService = Depends(_get_profiles),
 ):

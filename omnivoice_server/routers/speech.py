@@ -19,12 +19,36 @@ from pydantic import BaseModel, Field, field_validator
 from ..services.inference import InferenceService, QueueFullError, SynthesisRequest
 from ..services.metrics import MetricsService
 from ..services.profiles import ProfileService
-from ..utils.audio import encode_tensors, tensor_to_pcm16_bytes
+from ..utils.audio import encode_tensors, normalize_loudness, tensor_to_pcm16_bytes
 from ..utils.text import split_sentences
 from ..voice_presets import DEFAULT_DESIGN_INSTRUCTIONS, OPENAI_VOICE_PRESETS
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+ACCEPT_FORMAT_MAP: dict[str, str] = {
+    "audio/wav": "wav",
+    "audio/mpeg": "mp3",
+    "audio/mp3": "mp3",
+    "audio/ogg": "opus",
+    "audio/opus": "opus",
+    "audio/pcm": "pcm",
+}
+
+
+def _resolve_format(
+    response_format: str | None,
+    accept: str | None,
+) -> str:
+    """Resolve output format: explicit param > Accept header > default wav."""
+    if response_format is not None:
+        return response_format
+    if accept:
+        for mime, fmt in ACCEPT_FORMAT_MAP.items():
+            if mime in accept:
+                return fmt
+    return "wav"
 
 
 class SpeechRequest(BaseModel):
@@ -35,7 +59,12 @@ class SpeechRequest(BaseModel):
     voice: str = Field(default="auto")
     speaker: str | None = Field(default=None)
     instructions: str | None = Field(default=None)
-    response_format: Literal["wav", "pcm", "mp3", "opus"] = Field(default="wav")
+    response_format: Literal["wav", "pcm", "mp3", "opus"] | None = Field(
+        default=None,
+        description=(
+            "Output audio format. Auto-detected from Accept header if not set."
+        ),
+    )
     speed: float = Field(default=1.0, ge=0.25, le=4.0)
     stream: bool = Field(default=False)
     num_step: int | None = Field(default=None, ge=1, le=64)
@@ -100,7 +129,61 @@ def _resolve_synthesis_mode(
     return "design", DEFAULT_DESIGN_INSTRUCTIONS, None, None
 
 
-@router.post("/audio/speech")
+@router.post(
+    "/audio/speech",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "basic_wav": {
+                            "summary": "Basic WAV output",
+                            "value": {
+                                "input": "Hello, welcome to the service.",
+                                "voice": "alloy",
+                            },
+                        },
+                        "opus_format": {
+                            "summary": "Opus compressed output",
+                            "value": {
+                                "input": "The quick brown fox jumps.",
+                                "response_format": "opus",
+                            },
+                        },
+                        "custom_voice": {
+                            "summary": "Custom voice instructions",
+                            "value": {
+                                "input": "Good morning everyone.",
+                                "instructions": "A warm, deep male voice, "
+                                "speaking slowly and clearly.",
+                                "response_format": "mp3",
+                            },
+                        },
+                        "streaming": {
+                            "summary": "Streaming PCM output",
+                            "value": {
+                                "input": "This is a longer text that "
+                                "benefits from sentence-level streaming.",
+                                "stream": True,
+                            },
+                        },
+                    }
+                }
+            }
+        },
+        "responses": {
+            "200": {
+                "description": "Audio file in requested format",
+                "content": {
+                    "audio/wav": {"schema": {"type": "string", "format": "binary"}},
+                    "audio/mpeg": {"schema": {"type": "string", "format": "binary"}},
+                    "audio/ogg": {"schema": {"type": "string", "format": "binary"}},
+                    "audio/pcm": {"schema": {"type": "string", "format": "binary"}},
+                },
+            }
+        },
+    },
+)
 async def create_speech(
     request: Request,
     body: SpeechRequest,
@@ -110,6 +193,7 @@ async def create_speech(
     cfg=Depends(_get_cfg),
 ):
     """Generate speech from text."""
+    fmt = _resolve_format(body.response_format, request.headers.get("Accept"))
     mode, instruct, ref_audio_path, ref_text = _resolve_synthesis_mode(body, profile_svc)
 
     req = SynthesisRequest(
@@ -170,7 +254,8 @@ async def create_speech(
                 else cfg.class_temperature
             ),
             duration=body.duration,
-            fmt=body.response_format,
+            fmt=fmt,
+            lufs=cfg.loudness_target_lufs,
         )
         cached = cache.get(cache_key)
         if cached is not None:
@@ -213,7 +298,12 @@ async def create_speech(
             detail=f"Synthesis failed: {e}",
         )
 
-    audio_bytes, media_type = encode_tensors(result.tensors, body.response_format)
+    # Normalize loudness if configured
+    tensors = result.tensors
+    if cfg.loudness_target_lufs is not None:
+        tensors = [normalize_loudness(t, cfg.loudness_target_lufs) for t in tensors]
+
+    audio_bytes, media_type = encode_tensors(tensors, fmt)
 
     # Save to cache
     if cache is not None and cache_key is not None:
@@ -277,7 +367,34 @@ async def _stream_sentences(
             return
 
 
-@router.post("/audio/speech/clone")
+@router.post(
+    "/audio/speech/clone",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "multipart/form-data": {
+                    "examples": {
+                        "basic_clone": {
+                            "summary": "Clone voice from reference audio",
+                            "value": {
+                                "text": "This is the text to synthesize.",
+                                "ref_audio": "(binary WAV file upload)",
+                            },
+                        },
+                        "with_ref_text": {
+                            "summary": "Clone with reference transcript",
+                            "value": {
+                                "text": "Hello from the cloned voice.",
+                                "ref_audio": "(binary WAV file upload)",
+                                "ref_text": "The transcript of the reference audio.",
+                            },
+                        },
+                    }
+                }
+            }
+        }
+    },
+)
 async def create_speech_clone(
     request: Request,
     text: str = Form(..., min_length=1, max_length=10_000),
