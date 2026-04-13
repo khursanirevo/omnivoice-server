@@ -23,7 +23,10 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 DEFAULT_URL = "http://localhost:8880"
-DEFAULT_TEXT = "The quick brown fox jumps over the lazy dog. This is a test of the text to speech system."
+DEFAULT_TEXT = (
+    "The quick brown fox jumps over the lazy dog. "
+    "This is a test of the text to speech system."
+)
 WARMUP_REQUESTS = 3
 
 
@@ -54,7 +57,11 @@ async def single_request(session: aiohttp.ClientSession, url: str, text: str, vo
     async with session.post(f"{url}/v1/audio/speech", json=payload) as resp:
         if resp.status != 200:
             body = await resp.text()
-            return {"status": resp.status, "error": body, "wall_time_s": time.perf_counter() - start}
+            return {
+                "status": resp.status,
+                "error": body,
+                "wall_time_s": time.perf_counter() - start,
+            }
 
         # Read with TTFA measurement
         chunks = []
@@ -109,8 +116,13 @@ async def warmup(url: str, count: int = WARMUP_REQUESTS):
     async with aiohttp.ClientSession() as session:
         for i in range(count):
             result = await single_request(session, url, DEFAULT_TEXT)
-            logger.info("  Warmup %d: status=%s wall=%.2fs rtf=%.3f",
-                        i + 1, result.get("status"), result.get("wall_time_s", 0), result.get("rtf", 0))
+            logger.info(
+                "  Warmup %d: status=%s wall=%.2fs rtf=%.3f",
+                i + 1,
+                result.get("status"),
+                result.get("wall_time_s", 0),
+                result.get("rtf", 0),
+            )
     logger.info("Warmup complete")
 
 
@@ -167,10 +179,18 @@ async def benchmark_concurrent(url: str, num_concurrent: int, num_batches: int):
                             min(ttfa_values), max(ttfa_values))
             if wall_values:
                 throughput = len(successful) / batch_time
-                logger.info("    Throughput: %.2f req/s (batch total: %.2fs)", throughput, batch_time)
+                logger.info(
+                    "    Throughput: %.2f req/s (batch total: %.2fs)",
+                    throughput,
+                    batch_time,
+                )
             if failed:
                 for f in failed:
-                    logger.warning("    FAILED: status=%s error=%s", f.get("status"), str(f.get("error", ""))[:100])
+                    logger.warning(
+                        "    FAILED: status=%s error=%s",
+                        f.get("status"),
+                        str(f.get("error", ""))[:100],
+                    )
 
     return all_results
 
@@ -192,8 +212,8 @@ def print_summary(label: str, results: list):
     print(f"{'='*60}")
     print(f"  Successful: {len(successful)}/{len(results)}")
     print(f"  Audio duration: {statistics.mean(durations):.2f}s (avg)")
-    print(f"")
-    print(f"  RTF (lower=better, <1.0=faster than real-time):")
+    print("")
+    print("  RTF (lower=better, <1.0=faster than real-time):")
     print(f"    Mean:   {statistics.mean(rtf_values):.3f}")
     print(f"    Median: {statistics.median(rtf_values):.3f}")
     print(f"    Min:    {min(rtf_values):.3f}")
@@ -203,14 +223,14 @@ def print_summary(label: str, results: list):
         sorted_rtf = sorted(rtf_values)
         p95_idx = int(len(sorted_rtf) * 0.95)
         print(f"    P95:    {sorted_rtf[p95_idx]:.3f}")
-    print(f"")
-    print(f"  TTFA (Time To First Audio):")
+    print("")
+    print("  TTFA (Time To First Audio):")
     print(f"    Mean:   {statistics.mean(ttfa_values):.3f}s")
     print(f"    Median: {statistics.median(ttfa_values):.3f}s")
     print(f"    Min:    {min(ttfa_values):.3f}s")
     print(f"    Max:    {max(ttfa_values):.3f}s")
-    print(f"")
-    print(f"  Wall time per request:")
+    print("")
+    print("  Wall time per request:")
     print(f"    Mean:   {statistics.mean(wall_values):.2f}s")
     print(f"    Median: {statistics.median(wall_values):.2f}s")
     print(f"{'='*60}\n")

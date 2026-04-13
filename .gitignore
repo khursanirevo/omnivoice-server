@@ -36,4 +36,15 @@ temp.log
 
 # Voice samples (stored in GitHub Releases)
 voice_samples/*.wav
-output*
+
+# Generated output directories
+output*/
+
+# Scratch analysis
+REPO_ANALYSIS/
+
+# Generated audio from benchmarks
+output_malay_eng/
+
+# Temporary debug scripts
+tmp*.py
