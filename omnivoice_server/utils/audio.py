@@ -24,11 +24,11 @@ def normalize_loudness(
     import numpy as np
     import pyloudnorm as pyln
 
-    # (1, T) or (T,) → numpy (channels, samples)
+    # (1, T) or (T,) → numpy (samples, channels) for pyloudnorm
     audio = tensor.detach().cpu().float()
     if audio.dim() == 1:
         audio = audio.unsqueeze(0)
-    np_audio = audio.numpy()
+    np_audio = audio.numpy().T  # (channels, T) → (T, channels)
 
     meter = pyln.Meter(sample_rate)
     current_lufs = meter.integrated_loudness(np_audio)
@@ -37,7 +37,9 @@ def normalize_loudness(
         return tensor  # Silence or too short to measure
 
     normalized = pyln.normalize.loudness(np_audio, current_lufs, target_lufs)
-    return torch.from_numpy(normalized).to(tensor.dtype)
+    # (T, channels) → (channels, T) → tensor (1, T)
+    result = torch.from_numpy(normalized.T).to(tensor.device)
+    return result.to(tensor.dtype)
 
 
 def tensor_to_wav_bytes(tensor: torch.Tensor) -> bytes:
