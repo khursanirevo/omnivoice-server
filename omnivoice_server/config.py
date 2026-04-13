@@ -185,6 +185,24 @@ class Settings(BaseSettings):
         description="Max upload size for ref_audio files in megabytes.",
     )
 
+    # Response cache
+    response_cache_enabled: bool = Field(
+        default=True,
+        description="Cache encoded audio for repeated identical requests.",
+    )
+    response_cache_max_gb: float = Field(
+        default=5.0,
+        ge=0.0,
+        description="Max disk space for response cache (GB).",
+    )
+
+    # Backpressure
+    max_queue_depth: int = Field(
+        default=64,
+        ge=1,
+        description="Max pending requests. Excess returns 503.",
+    )
+
     @property
     def mps_should_enable(self) -> bool:
         """Resolve auto/true/false to boolean."""

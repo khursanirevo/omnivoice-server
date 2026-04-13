@@ -16,10 +16,10 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
-from ..services.inference import InferenceService, SynthesisRequest
+from ..services.inference import InferenceService, QueueFullError, SynthesisRequest
 from ..services.metrics import MetricsService
 from ..services.profiles import ProfileService
-from ..utils.audio import tensor_to_pcm16_bytes, tensors_to_wav_bytes
+from ..utils.audio import encode_tensors, tensor_to_pcm16_bytes
 from ..utils.text import split_sentences
 from ..voice_presets import DEFAULT_DESIGN_INSTRUCTIONS, OPENAI_VOICE_PRESETS
 
@@ -35,7 +35,7 @@ class SpeechRequest(BaseModel):
     voice: str = Field(default="auto")
     speaker: str | None = Field(default=None)
     instructions: str | None = Field(default=None)
-    response_format: Literal["wav", "pcm"] = Field(default="wav")
+    response_format: Literal["wav", "pcm", "mp3", "opus"] = Field(default="wav")
     speed: float = Field(default=1.0, ge=0.25, le=4.0)
     stream: bool = Field(default=False)
     num_step: int | None = Field(default=None, ge=1, le=64)
@@ -98,6 +98,7 @@ def _resolve_synthesis_mode(
 
 @router.post("/audio/speech")
 async def create_speech(
+    request: Request,
     body: SpeechRequest,
     inference_svc: InferenceService = Depends(_get_inference),
     profile_svc: ProfileService = Depends(_get_profiles),
@@ -136,9 +137,61 @@ async def create_speech(
             },
         )
 
+    # Check response cache (non-streaming only)
+    cache = getattr(request.app.state, "response_cache", None)
+    cache_key = None
+    if cache is not None:
+        from ..services.response_cache import ResponseCache
+
+        cache_key = ResponseCache.build_key(
+            text=body.input,
+            mode=mode,
+            instruct=instruct,
+            speed=body.speed,
+            num_step=body.num_step or cfg.num_step,
+            guidance_scale=(
+                body.guidance_scale if body.guidance_scale is not None
+                else cfg.guidance_scale
+            ),
+            denoise=body.denoise if body.denoise is not None else cfg.denoise,
+            t_shift=body.t_shift if body.t_shift is not None else cfg.t_shift,
+            pt=(
+                body.position_temperature
+                if body.position_temperature is not None
+                else cfg.position_temperature
+            ),
+            ct=(
+                body.class_temperature
+                if body.class_temperature is not None
+                else cfg.class_temperature
+            ),
+            duration=body.duration,
+            fmt=body.response_format,
+        )
+        cached = cache.get(cache_key)
+        if cached is not None:
+            audio_bytes, metadata = cached
+            metrics_svc.record_success(0.0)
+            return Response(
+                content=audio_bytes,
+                media_type=metadata.get("media_type", "audio/wav"),
+                headers={
+                    "X-Audio-Duration-S": str(metadata.get("duration_s", 0)),
+                    "X-Synthesis-Latency-S": "0",
+                    "X-Cache": "HIT",
+                },
+            )
+
+    # Run inference
     try:
         result = await inference_svc.synthesize(req)
         metrics_svc.record_success(result.latency_s)
+    except QueueFullError as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(e),
+            headers={"Retry-After": "1"},
+        )
     except asyncio.TimeoutError:
         metrics_svc.record_timeout()
         raise HTTPException(
@@ -153,12 +206,14 @@ async def create_speech(
             detail=f"Synthesis failed: {e}",
         )
 
-    if body.response_format == "pcm":
-        audio_bytes = b"".join(tensor_to_pcm16_bytes(t) for t in result.tensors)
-        media_type = "audio/pcm"
-    else:
-        audio_bytes = tensors_to_wav_bytes(result.tensors)
-        media_type = "audio/wav"
+    audio_bytes, media_type = encode_tensors(result.tensors, body.response_format)
+
+    # Save to cache
+    if cache is not None and cache_key is not None:
+        cache.put(cache_key, audio_bytes, {
+            "media_type": media_type,
+            "duration_s": result.duration_s,
+        })
 
     return Response(
         content=audio_bytes,
@@ -290,6 +345,12 @@ async def create_speech_clone(
         try:
             result = await inference_svc.synthesize(req)
             metrics_svc.record_success(result.latency_s)
+        except QueueFullError as e:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(e),
+                headers={"Retry-After": "1"},
+            )
         except asyncio.TimeoutError:
             metrics_svc.record_timeout()
             raise HTTPException(
@@ -304,9 +365,10 @@ async def create_speech_clone(
                 detail=f"Synthesis failed: {e}",
             )
 
+        audio_out, media_type = encode_tensors(result.tensors, "wav")
         return Response(
-            content=tensors_to_wav_bytes(result.tensors),
-            media_type="audio/wav",
+            content=audio_out,
+            media_type=media_type,
             headers={
                 "X-Audio-Duration-S": str(round(result.duration_s, 3)),
                 "X-Synthesis-Latency-S": str(round(result.latency_s, 3)),

@@ -63,6 +63,69 @@ def tensor_to_pcm16_bytes(tensor: torch.Tensor) -> bytes:
     return (flat * 32767).clamp(-32768, 32767).to(torch.int16).numpy().tobytes()
 
 
+def _encode_pcm_via_ffmpeg(
+    pcm_bytes: bytes, codec: str, fmt: str, bitrate: str | None = None
+) -> bytes:
+    """Encode raw PCM int16 bytes to an audio format via ffmpeg pipe."""
+    import subprocess
+
+    cmd = [
+        "ffmpeg", "-f", "s16le", "-ar", str(SAMPLE_RATE), "-ac", "1",
+        "-i", "-", "-c:a", codec, "-f", fmt, "-",
+    ]
+    if bitrate:
+        cmd.extend(["-b:a", bitrate])
+    proc = subprocess.run(cmd, input=pcm_bytes, capture_output=True)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg {codec} encoding failed: {proc.stderr.decode()[:300]}"
+        )
+    return proc.stdout
+
+
+def tensor_to_mp3_bytes(tensor: torch.Tensor, bitrate: str = "128k") -> bytes:
+    """Convert (1, T) float32 tensor to MP3 bytes via ffmpeg."""
+    flat = tensor.squeeze(0).cpu()
+    pcm = (flat * 32767).clamp(-32768, 32767).to(torch.int16).numpy().tobytes()
+    return _encode_pcm_via_ffmpeg(pcm, "libmp3lame", "mp3", bitrate)
+
+
+def tensor_to_opus_bytes(tensor: torch.Tensor, bitrate: str = "24k") -> bytes:
+    """Convert (1, T) float32 tensor to Opus OGG bytes via ffmpeg."""
+    flat = tensor.squeeze(0).cpu()
+    pcm = (flat * 32767).clamp(-32768, 32767).to(torch.int16).numpy().tobytes()
+    return _encode_pcm_via_ffmpeg(pcm, "libopus", "ogg", bitrate)
+
+
+FORMAT_MEDIA_TYPES: dict[str, str] = {
+    "wav": "audio/wav",
+    "pcm": "audio/pcm",
+    "mp3": "audio/mpeg",
+    "opus": "audio/ogg; codecs=opus",
+}
+
+
+def encode_tensors(tensors: list[torch.Tensor], fmt: str) -> tuple[bytes, str]:
+    """Encode tensor list to bytes. Returns (audio_bytes, media_type)."""
+    if fmt == "wav":
+        return tensors_to_wav_bytes(tensors), FORMAT_MEDIA_TYPES["wav"]
+    if fmt == "pcm":
+        return (
+            b"".join(tensor_to_pcm16_bytes(t) for t in tensors),
+            FORMAT_MEDIA_TYPES["pcm"],
+        )
+
+    # Combine tensors for compressed formats
+    combined = torch.cat([t.cpu() for t in tensors], dim=-1)
+
+    if fmt == "mp3":
+        return tensor_to_mp3_bytes(combined), FORMAT_MEDIA_TYPES["mp3"]
+    if fmt == "opus":
+        return tensor_to_opus_bytes(combined), FORMAT_MEDIA_TYPES["opus"]
+
+    raise ValueError(f"Unsupported audio format: {fmt}")
+
+
 def read_upload_bounded(data: bytes, max_bytes: int, field_name: str = "ref_audio") -> bytes:
     """
     Validates upload size after reading.

@@ -27,6 +27,10 @@ from .model import ModelService
 logger = logging.getLogger(__name__)
 
 
+class QueueFullError(Exception):
+    """Raised when the inference queue is at capacity."""
+
+
 @dataclass
 class SynthesisRequest:
     text: str
@@ -185,6 +189,7 @@ class InferenceService:
         # Request batching state
         self._batch_queue: asyncio.Queue[tuple[SynthesisRequest, asyncio.Future]] | None = None
         self._batch_task: asyncio.Task | None = None
+        self._pending: int = 0
 
     def start_batch_scheduler(self) -> None:
         """Start the batch scheduler loop (call after event loop starts)."""
@@ -203,12 +208,24 @@ class InferenceService:
             self._batch_task.cancel()
             self._batch_task = None
 
+    @property
+    def pending_count(self) -> int:
+        return self._pending
+
     async def synthesize(self, req: SynthesisRequest) -> SynthesisResult:
-        if self._cfg.batch_enabled and self._batch_queue is not None:
-            return await self._synthesize_batched(req)
-        if self._executor is not None:
-            return await self._synthesize_threaded(req)
-        return await self._synthesize_direct(req)
+        if self._pending >= self._cfg.max_queue_depth:
+            raise QueueFullError(
+                f"{self._pending} pending >= {self._cfg.max_queue_depth}"
+            )
+        self._pending += 1
+        try:
+            if self._cfg.batch_enabled and self._batch_queue is not None:
+                return await self._synthesize_batched(req)
+            if self._executor is not None:
+                return await self._synthesize_threaded(req)
+            return await self._synthesize_direct(req)
+        finally:
+            self._pending -= 1
 
     async def _synthesize_batched(self, req: SynthesisRequest) -> SynthesisResult:
         """Submit request to batch queue and wait for result."""

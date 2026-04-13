@@ -51,6 +51,17 @@ async def health(request: Request):
             "vram_total_mb": bench["vram_total_mb"],
         }
 
+    # Queue depth
+    inference_svc = getattr(request.app.state, "inference_svc", None)
+    if inference_svc is not None:
+        result["pending_requests"] = inference_svc.pending_count
+        result["max_queue_depth"] = request.app.state.cfg.max_queue_depth
+
+    # Response cache stats
+    cache = getattr(request.app.state, "response_cache", None)
+    if cache is not None:
+        result["response_cache"] = cache.stats()
+
     return result
 
 

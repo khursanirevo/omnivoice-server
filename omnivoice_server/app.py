@@ -35,6 +35,17 @@ async def lifespan(app: FastAPI):
     cfg.profile_dir.mkdir(parents=True, exist_ok=True)
     app.state.profile_svc = ProfileService(profile_dir=cfg.profile_dir)
 
+    # Response cache
+    if cfg.response_cache_enabled:
+        from .services.response_cache import ResponseCache
+
+        app.state.response_cache = ResponseCache(
+            cfg.profile_dir / "response_cache", cfg.response_cache_max_gb
+        )
+        logger.info("Response cache enabled (%.1f GB)", cfg.response_cache_max_gb)
+    else:
+        app.state.response_cache = None
+
     if cfg.workers == 1:
         # Single-worker mode: load model here, use ThreadPoolExecutor
         model_svc = ModelService(cfg)
