@@ -47,7 +47,7 @@ class SpeechRequest(BaseModel):
     duration: float | None = Field(default=None, ge=0.1, le=60.0)
     language: str | None = Field(
         default=None,
-        description="Optional language code (e.g., 'en', 'vi', 'zh') for improved multilingual pronunciation",
+        description="Language code (e.g., 'en', 'vi', 'zh') for multilingual pronunciation",
     )
 
     @field_validator("model")
