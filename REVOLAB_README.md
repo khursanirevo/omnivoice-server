@@ -43,18 +43,32 @@ GPU requires the NVIDIA runtime + `nvidia-container-toolkit` installed.
 
 ## Option 2: Bare metal
 
-```bash
-# Prerequisites: Python 3.10+, PyTorch with CUDA
-pip install torch==2.7.0+cu128 torchaudio==2.7.0+cu128 --index-url https://download.pytorch.org/whl/cu128
+**Use `uv` — not pip.** All commands below use `uv`.
 
-# Install
-pip install -e .
+```bash
+# Prerequisites: Python 3.10+, uv (https://docs.astral.sh/uv/getting-started/installation/)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Clone
+git clone https://github.com/khursanirevo/omnivoice-server.git
+cd omnivoice-server
+
+# Install PyTorch with CUDA first (required before project install)
+uv pip install torch==2.7.0+cu128 torchaudio==2.7.0+cu128 --index-url https://download.pytorch.org/whl/cu128
+
+# Sync project dependencies
+uv sync
 
 # Run
-omnivoice-server --host 0.0.0.0 --port 8880 --device cuda
+uv run omnivoice-server --host 0.0.0.0 --port 8880 --device cuda
+
+# Or use the module directly
+uv run python -m omnivoice_server --host 0.0.0.0 --port 8880 --device cuda
 ```
 
 ### Systemd
+
+The service file uses `uv run` to launch the server.
 
 ```bash
 # Copy service file
@@ -67,13 +81,14 @@ OMNIVOICE_API_KEY=your-key-here
 OMNIVOICE_NUM_STEP=16
 EOF
 
+# Edit paths in the service file to match your install location
+# The ExecStart should use: uv run python -m omnivoice_server --host 0.0.0.0 --port 8880 --device cuda
+
 # Enable and start
 sudo systemctl daemon-reload
 sudo systemctl enable --now omnivoice-server
 sudo journalctl -u omnivoice-server -f   # view logs
 ```
-
-Edit the `ExecStart` path and user/group in the `.service` file to match your environment.
 
 ## API Endpoints
 
@@ -147,7 +162,7 @@ All env vars use `OMNIVOICE_` prefix. CLI flags override env vars.
 Best config: `torch.compile(mode="max-autotune")` on CUDA FP16.
 
 ```bash
-omnivoice-server --device cuda --compile-mode max-autotune --num-step 16
+uv run omnivoice-server --device cuda --compile-mode max-autotune --num-step 16
 ```
 
 Verified on H200: **99ms at step=16, 41ms at step=4**.
@@ -157,8 +172,8 @@ Verified on H200: **99ms at step=16, 41ms at step=4**.
 Best config: OpenVINO + torchao int8dq.
 
 ```bash
-pip install openvino torchao
-omnivoice-server --device cpu --quantization int8dq --compile-mode default
+uv pip install openvino torchao
+uv run omnivoice-server --device cpu --quantization int8dq --compile-mode default
 ```
 
 Note: OpenVINO backend is used automatically when `--compile-mode` is set and `openvino` is installed (it registers as a `torch.compile` backend).
@@ -200,7 +215,7 @@ Custom voices via `instructions` field: `"female, british accent, young adult, h
 
 | Issue | Fix |
 |-------|-----|
-| Model download fails | Set `HF_HUB_CACHE` to a writable dir, or pre-download with `python -c "from omnivoice import OmniVoice; OmniVoice.from_pretrained('k2-fsa/OmniVoice')"` |
+| Model download fails | Set `HF_HUB_CACHE` to a writable dir, or pre-download with `uv run python -c "from omnivoice import OmniVoice; OmniVoice.from_pretrained('k2-fsa/OmniVoice')"` |
 | CUDA OOM | Reduce `--max-concurrent 1` or use `--device cpu` |
 | First request slow | Model compilation. Use `--compile-cache-dir` with precompiled kernels |
 | 503 Queue Full | Increase `--max-queue-depth` or add GPU workers |
