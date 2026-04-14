@@ -82,8 +82,8 @@ textarea{min-height:80px}
         <div class="filename" id="ref-filename"></div>
       </div>
       <div style="margin-top:12px">
-        <label for="ref-text">Reference transcript (optional)</label>
-        <input type="text" id="ref-text" placeholder="What was said in the reference audio">
+        <label for="ref-text">Reference transcript (required)</label>
+        <input type="text" id="ref-text" placeholder="Type what was said in the reference audio" required>
       </div>
     </div>
   </div>
@@ -212,6 +212,7 @@ async function generate() {
 
     if (currentMode === 'clone') {
       if (!refAudio.files.length) throw new Error('Please upload reference audio for voice cloning');
+      if (!document.getElementById('ref-text').value.trim()) throw new Error('Please enter the reference transcript');
       const formData = new FormData();
       formData.append('text', text);
       formData.append('ref_audio', refAudio.files[0]);
