@@ -13,6 +13,26 @@ OpenAI-compatible TTS server wrapping [OmniVoice](https://github.com/k2-fsa/Omni
 | Model download | ~3GB from HuggingFace on first startup |
 | Min hardware | 8GB RAM (CPU), 4GB VRAM (GPU) |
 
+## Using Custom Checkpoints
+
+Point to your own fine-tuned weights on HuggingFace:
+
+```bash
+# Bare metal
+uv run omnivoice-server --model-id Revolab/omnivoice
+
+# Docker
+OMNIVOICE_MODEL_ID=Revolab/omnivoice docker compose up -d
+
+# Or set in docker-compose.yml / env file
+```
+
+The server will download from the specified repo on first startup. Subsequent starts use the HuggingFace cache. To use a local path instead:
+
+```bash
+uv run omnivoice-server --model-id /data/models/omnivoice-checkpoint
+```
+
 ## Option 1: Docker (recommended)
 
 ```bash
@@ -140,7 +160,7 @@ All env vars use `OMNIVOICE_` prefix. CLI flags override env vars.
 | `OMNIVOICE_NUM_STEP` | `16` | Inference steps (1-64). 16=fast, 32=quality |
 | `OMNIVOICE_MAX_CONCURRENT` | `2` | Max parallel inference calls |
 | `OMNIVOICE_API_KEY` | `""` | Bearer token. Empty = no auth |
-| `OMNIVOICE_MODEL_ID` | `k2-fsa/OmniVoice` | HuggingFace repo or local path |
+| `OMNIVOICE_MODEL_ID` | `k2-fsa/OmniVoice` | HuggingFace repo or local path. Use your custom checkpoint: `Revolab/omnivoice` |
 | `OMNIVOICE_PROFILE_DIR` | `~/.omnivoice/profiles` | Voice profiles directory |
 | `OMNIVOICE_LOG_LEVEL` | `info` | `debug`, `info`, `warning`, `error` |
 | `OMNIVOICE_REQUEST_TIMEOUT_S` | `120` | Max seconds per request |

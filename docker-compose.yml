@@ -15,6 +15,9 @@ services:
       - OMNIVOICE_NUM_STEP=32
       - OMNIVOICE_MAX_CONCURRENT=2
 
+      # Model — point to your custom checkpoint repo on HuggingFace
+      - OMNIVOICE_MODEL_ID=${OMNIVOICE_MODEL_ID:-k2-fsa/OmniVoice}
+
       # GPU visibility
       - NVIDIA_VISIBLE_DEVICES=0
 
