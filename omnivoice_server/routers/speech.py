@@ -179,16 +179,17 @@ def _resolve_synthesis_mode(
     from ..services.profiles import ProfileNotFoundError
 
     instructions = body.instructions.strip() if body.instructions else None
-    speaker = body.speaker.strip().lower() if body.speaker else None
-    voice = body.voice.strip().lower() if body.voice else None
+    speaker = body.speaker.strip() if body.speaker else None
+    voice = body.voice.strip() if body.voice else None
 
     if instructions:
         return "design", instructions, None, None, None
 
     candidate = speaker or voice
 
-    if candidate and candidate in OPENAI_VOICE_PRESETS:
-        return "design", OPENAI_VOICE_PRESETS[candidate], None, None, None
+    # Preset names are lowercase — compare case-insensitively
+    if candidate and candidate.lower() in OPENAI_VOICE_PRESETS:
+        return "design", OPENAI_VOICE_PRESETS[candidate.lower()], None, None, None
 
     # Strip "clone:" prefix for backwards compatibility with list_voices IDs
     profile_id = candidate
