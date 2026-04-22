@@ -37,8 +37,8 @@ class Settings(BaseSettings):
         default=None,
         description="Override HuggingFace model cache directory",
     )
-    device: Literal["auto", "cuda", "mps", "cpu"] = "cpu"
-    num_step: int = Field(default=16, ge=1, le=64)  # Min 16 for acceptable quality
+    device: Literal["auto", "cuda", "mps", "cpu"] = "auto"
+    num_step: int = Field(default=16, ge=8, le=32)
 
     # Optimization
     compile_mode: Literal["none", "default", "reduce-overhead", "max-autotune"] = Field(
@@ -203,6 +203,12 @@ class Settings(BaseSettings):
         default=5.0,
         ge=0.0,
         description="Max disk space for response cache (GB).",
+    )
+
+    # Tracing
+    trace_dir: Path = Field(
+        default=Path("traces"),
+        description="Save a copy of every generated audio + JSON metadata here for tracing.",
     )
 
     # Backpressure
