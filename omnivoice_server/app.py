@@ -169,8 +169,13 @@ async def lifespan(app: FastAPI):
 
 
 def _auto_register_voice_samples(profile_svc: ProfileService) -> None:
-    """Register .wav files in voice_samples/ that have a companion .txt transcript."""
+    """Register audio files in voice_samples/ that have a companion .txt transcript.
+
+    Supports .wav and .mp3. Audio is converted to 24 kHz mono WAV before saving.
+    """
     import pathlib
+
+    import torchaudio
 
     samples_dir = pathlib.Path("voice_samples")
     if not samples_dir.is_dir():
@@ -178,16 +183,45 @@ def _auto_register_voice_samples(profile_svc: ProfileService) -> None:
 
     from .services.profiles import ProfileAlreadyExistsError
 
-    for wav in sorted(samples_dir.glob("*.wav")):
-        txt = wav.with_suffix(".txt")
+    audio_files = sorted(
+        f for f in samples_dir.iterdir()
+        if f.suffix.lower() in (".wav", ".mp3")
+    )
+
+    for audio in audio_files:
+        txt = audio.with_suffix(".txt")
         if not txt.exists():
-            logger.warning("voice_samples/%s has no companion .txt — skipping auto-register", wav.name)
+            logger.warning("voice_samples/%s has no companion .txt — skipping auto-register", audio.name)
             continue
-        profile_id = wav.stem
+
+        # Sanitize stem to a valid profile_id (mirrors ProfileService._profile_path)
+        profile_id = "".join(c for c in audio.stem if c.isalnum() or c in "-_")
+        if not profile_id:
+            logger.warning("voice_samples/%s: cannot derive a valid profile_id — skipping", audio.name)
+            continue
+
         ref_text = txt.read_text().strip()
+
+        # Convert to 24 kHz mono WAV bytes via temp file (torchaudio needs a path)
         try:
-            profile_svc.save_profile(profile_id, wav.read_bytes(), ref_text=ref_text, overwrite=False)
-            logger.info("Auto-registered voice profile '%s' from voice_samples/", profile_id)
+            import tempfile
+            waveform, sr = torchaudio.load(str(audio))
+            if waveform.shape[0] > 1:
+                waveform = waveform.mean(0, keepdim=True)
+            if sr != 24000:
+                waveform = torchaudio.functional.resample(waveform, sr, 24000)
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                tmp_path = tmp.name
+            torchaudio.save(tmp_path, waveform, 24000)
+            audio_bytes = pathlib.Path(tmp_path).read_bytes()
+            pathlib.Path(tmp_path).unlink()
+        except Exception as e:
+            logger.warning("voice_samples/%s: audio load failed (%s) — skipping", audio.name, e)
+            continue
+
+        try:
+            profile_svc.save_profile(profile_id, audio_bytes, ref_text=ref_text, overwrite=False)
+            logger.info("Auto-registered voice profile '%s' from voice_samples/%s", profile_id, audio.name)
         except ProfileAlreadyExistsError:
             logger.debug("Voice profile '%s' already exists — skipping", profile_id)
 
