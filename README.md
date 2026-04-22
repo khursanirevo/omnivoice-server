@@ -5,7 +5,7 @@ OpenAI-compatible HTTP server for [OmniVoice](https://github.com/k2-fsa/OmniVoic
 ## Setup
 
 ```bash
-git clone https://github.com/maemreyo/omnivoice-server.git
+git clone https://github.com/khursanirevo/omnivoice-server.git
 cd omnivoice-server
 bash scripts/install.sh        # auto-detects GPU driver, installs matching PyTorch
 uv run omnivoice-server        # downloads model (~3GB) on first run
@@ -128,6 +128,26 @@ For production: `--compile-mode max-autotune` compiles Triton kernels on first b
 | `GET` | `/ready` | Readiness (200 when model loaded, 503 during startup) |
 | `GET` | `/health` | Full status JSON |
 | `GET` | `/metrics/prometheus` | Prometheus metrics |
+
+## Systemd
+
+```bash
+sudo cp omnivoice-server.service /etc/systemd/system/
+# Edit User, Group, and ExecStart path in the service file
+sudo systemctl daemon-reload
+sudo systemctl enable --now omnivoice-server
+sudo journalctl -u omnivoice-server -f
+```
+
+## Troubleshooting
+
+| Issue | Fix |
+|-------|-----|
+| CUDA not detected | Run `bash scripts/install.sh` — re-detects and reinstalls correct torch variant |
+| CUDA OOM | Lower `--max-concurrent` or use `--device cpu` |
+| First request slow | Kernel compilation on first run. Use `--compile-cache-dir` to persist |
+| 503 Queue Full | Raise `--max-queue-depth` or add inference slots |
+| Auth failing | Check `OMNIVOICE_API_KEY` matches `Authorization: Bearer <key>` |
 
 ## Development
 
