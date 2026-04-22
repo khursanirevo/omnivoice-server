@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 PROFILE_META_FILE = "meta.json"
 PROFILE_AUDIO_FILE = "ref_audio.wav"
+PROFILE_EMBEDDING_FILE = "embedding.pt"
 
 
 class ProfileNotFoundError(Exception):
@@ -58,6 +59,10 @@ class ProfileService:
                     profiles.append({"profile_id": p.name, **meta})
         return profiles
 
+    def get_embedding_cache_path(self, profile_id: str) -> Path:
+        """Return path to the cached speaker embedding (.pt) for a profile."""
+        return self._profile_path(profile_id) / PROFILE_EMBEDDING_FILE
+
     def get_ref_audio_path(self, profile_id: str) -> Path:
         """Return path to ref audio file. Raises ProfileNotFoundError if missing."""
         path = self._profile_path(profile_id) / PROFILE_AUDIO_FILE
@@ -90,6 +95,11 @@ class ProfileService:
                 )
 
             profile_path.mkdir(parents=True, exist_ok=True)
+
+            # Invalidate stale embedding whenever profile content changes
+            embedding = profile_path / PROFILE_EMBEDDING_FILE
+            if embedding.exists():
+                embedding.unlink()
 
             # Write audio
             audio_path = profile_path / PROFILE_AUDIO_FILE

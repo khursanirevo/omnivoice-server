@@ -37,7 +37,8 @@ class SynthesisRequest:
     mode: str  # "auto" | "design" | "clone"
     instruct: str | None = None  # for mode="design"
     ref_audio_path: str | None = None  # tmp path, for mode="clone"
-    ref_text: str | None = None  # for mode="clone", optional
+    ref_text: str | None = None  # for mode="clone"
+    embedding_cache_path: str | None = None  # persistent .pt path for profile embeddings
     speed: float = 1.0
     num_step: int | None = None  # None → use server default
     # Advanced passthrough — None means "use upstream default"
@@ -121,17 +122,48 @@ class OmniVoiceAdapter:
 
         return kwargs
 
+    def _evict_cache_if_needed(self) -> None:
+        """Evict oldest entries. Must be called with self._cache_lock held."""
+        while len(self._clone_prompt_cache) > 32:
+            oldest_key = next(iter(self._clone_prompt_cache))
+            del self._clone_prompt_cache[oldest_key]
+
     def _get_or_create_clone_prompt(self, req: SynthesisRequest, model):
-        """Cache voice_clone_prompt keyed by ref audio file content hash."""
+        """Return voice_clone_prompt, using a three-tier cache:
+        1. In-memory by path key (profile requests, survives re-uploads)
+        2. Disk (.pt file next to profile audio, survives restarts)
+        3. In-memory by audio content hash (one-shot clone uploads)
+        """
         import pathlib
 
+        # Tier 1 & 2: profile-based persistent cache
+        path_key = f"path:{req.embedding_cache_path}" if req.embedding_cache_path else None
+        if path_key:
+            with self._cache_lock:
+                if path_key in self._clone_prompt_cache:
+                    logger.debug("Reusing in-memory speaker embedding for profile")
+                    return self._clone_prompt_cache[path_key]
+
+            disk_path = pathlib.Path(req.embedding_cache_path)
+            if disk_path.exists():
+                try:
+                    prompt = torch.load(disk_path, weights_only=False)
+                    with self._cache_lock:
+                        self._clone_prompt_cache[path_key] = prompt
+                        self._evict_cache_if_needed()
+                    logger.info("Loaded speaker embedding from disk: %s", disk_path.name)
+                    return prompt
+                except Exception as e:
+                    logger.warning("Failed to load cached embedding %s: %s", disk_path.name, e)
+
+        # Tier 3: content-hash in-memory cache (one-shot uploads)
         audio_bytes = pathlib.Path(req.ref_audio_path).read_bytes()
-        cache_key = hashlib.sha256(audio_bytes).hexdigest()
+        content_key = hashlib.sha256(audio_bytes).hexdigest()
 
         with self._cache_lock:
-            if cache_key in self._clone_prompt_cache:
+            if content_key in self._clone_prompt_cache:
                 logger.debug("Reusing cached voice clone prompt")
-                return self._clone_prompt_cache[cache_key]
+                return self._clone_prompt_cache[content_key]
 
         logger.info("Encoding voice clone prompt (new ref audio, %d bytes)", len(audio_bytes))
         prompt = model.create_voice_clone_prompt(
@@ -139,12 +171,21 @@ class OmniVoiceAdapter:
             ref_text=req.ref_text,
         )
 
+        # Persist to disk so next restart skips re-encoding
+        if req.embedding_cache_path:
+            try:
+                disk_path = pathlib.Path(req.embedding_cache_path)
+                disk_path.parent.mkdir(parents=True, exist_ok=True)
+                torch.save(prompt, disk_path)
+                logger.info("Saved speaker embedding to disk: %s", disk_path.name)
+            except Exception as e:
+                logger.warning("Failed to persist embedding: %s", e)
+
         with self._cache_lock:
-            self._clone_prompt_cache[cache_key] = prompt
-            # Evict oldest entries if cache grows too large
-            if len(self._clone_prompt_cache) > 32:
-                oldest_key = next(iter(self._clone_prompt_cache))
-                del self._clone_prompt_cache[oldest_key]
+            self._clone_prompt_cache[content_key] = prompt
+            if path_key:
+                self._clone_prompt_cache[path_key] = prompt
+            self._evict_cache_if_needed()
 
         return prompt
 
