@@ -33,6 +33,7 @@ dependencies = [
     "platformdirs>=3.0.0",
     "psutil>=6.0.0",
     "huggingface-hub>=0.26.0",
+    "torch>=2.0.0",
     "torchaudio>=2.0.0",
     "prometheus-client>=0.25.0",
     "pyloudnorm>=0.2.0",

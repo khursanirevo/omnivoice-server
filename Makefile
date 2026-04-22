@@ -1,14 +1,15 @@
-.PHONY: help install dev test test-cov lint format type-check clean build publish docs docker-build docker-run
+.PHONY: help install dev test test-cov lint format type-check clean build publish
 
 help: ## Show this help message
 	@echo "Available commands:"
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
 
-install: ## Install package with basic dependencies
-	pip install -e .
+install: ## Install with auto-detected PyTorch CUDA variant
+	bash scripts/install.sh
 
-dev: ## Install package with development dependencies
-	pip install -e ".[dev]"
+dev: ## Install with dev dependencies and auto-detected PyTorch CUDA variant
+	bash scripts/install.sh
+	uv sync --extra dev
 
 test: ## Run tests
 	pytest tests/ -v
@@ -38,15 +39,6 @@ publish-test: ## Publish to TestPyPI (for testing)
 
 publish: ## Publish to PyPI (requires authentication)
 	python -m twine upload dist/*
-
-docker-build: ## Build Docker image
-	docker build -t omnivoice-server:latest .
-
-docker-run: ## Run Docker container
-	docker run -d -p 8880:8880 -v $(PWD)/profiles:/app/profiles --name omnivoice omnivoice-server:latest
-
-docker-stop: ## Stop Docker container
-	docker stop omnivoice && docker rm omnivoice
 
 pre-commit-install: ## Install pre-commit hooks
 	pre-commit install
