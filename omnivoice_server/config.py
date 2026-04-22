@@ -30,7 +30,7 @@ class Settings(BaseSettings):
 
     # Model
     model_id: str = Field(
-        default="k2-fsa/OmniVoice",
+        default="Revolab/omnivoice",
         description="HuggingFace repo ID or local path",
     )
     model_cache_dir: Path | None = Field(

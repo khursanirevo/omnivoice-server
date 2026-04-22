@@ -8,10 +8,10 @@ OpenAI-compatible HTTP server for [OmniVoice](https://github.com/k2-fsa/OmniVoic
 git clone https://github.com/khursanirevo/omnivoice-server.git
 cd omnivoice-server
 bash scripts/install.sh        # auto-detects GPU driver, installs matching PyTorch
-uv run omnivoice-server        # downloads model (~3GB) on first run
+uv run omnivoice-server        # downloads Revolab/omnivoice (~3GB) on first run
 ```
 
-Server starts at `http://127.0.0.1:8880`. To use a custom or fine-tuned checkpoint:
+Server starts at `http://127.0.0.1:8880`. To use a different checkpoint:
 
 ```bash
 uv run omnivoice-server --model your-org/your-model
@@ -89,7 +89,7 @@ All settings via env vars (`OMNIVOICE_` prefix) or CLI flags.
 | `OMNIVOICE_HOST` | `127.0.0.1` | Bind host |
 | `OMNIVOICE_PORT` | `8880` | Port |
 | `OMNIVOICE_DEVICE` | `auto` | `auto`, `cuda`, `cpu` |
-| `OMNIVOICE_MODEL_ID` | `k2-fsa/OmniVoice` | HuggingFace repo or local path |
+| `OMNIVOICE_MODEL_ID` | `Revolab/omnivoice` | HuggingFace repo or local path |
 | `OMNIVOICE_NUM_STEP` | `16` | Diffusion steps (8–32) |
 | `OMNIVOICE_MAX_CONCURRENT` | `2` | Parallel inference slots |
 | `OMNIVOICE_API_KEY` | `""` | Bearer token (empty = no auth) |
