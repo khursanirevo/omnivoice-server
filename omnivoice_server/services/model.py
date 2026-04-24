@@ -135,6 +135,7 @@ class ModelService:
         config = config_cls()
 
         logger.info("Applying TorchAO quantization=%s to LLM backbone", self.cfg.quantization)
+        assert self._model is not None
         quantize_(self._model.llm, config=config)
         logger.info("Quantization applied")
 
@@ -151,6 +152,7 @@ class ModelService:
         logger.info(
             "Applying torch.compile(mode=%s) to LLM backbone", self.cfg.compile_mode
         )
+        assert self._model is not None
         compiled = torch.compile(self._model.llm, mode=self.cfg.compile_mode)
         self._model.llm = compiled
 

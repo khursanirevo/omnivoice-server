@@ -144,7 +144,7 @@ class OmniVoiceAdapter:
                     logger.debug("Reusing in-memory speaker embedding for profile")
                     return self._clone_prompt_cache[path_key]
 
-            disk_path = pathlib.Path(req.embedding_cache_path)
+            disk_path = pathlib.Path(req.embedding_cache_path)  # type: ignore[arg-type]
             if disk_path.exists():
                 try:
                     prompt = torch.load(disk_path, weights_only=False)
@@ -157,7 +157,7 @@ class OmniVoiceAdapter:
                     logger.warning("Failed to load cached embedding %s: %s", disk_path.name, e)
 
         # Tier 3: content-hash in-memory cache (one-shot uploads)
-        audio_bytes = pathlib.Path(req.ref_audio_path).read_bytes()
+        audio_bytes = pathlib.Path(req.ref_audio_path).read_bytes()  # type: ignore[arg-type]
         content_key = hashlib.sha256(audio_bytes).hexdigest()
 
         with self._cache_lock:
@@ -314,7 +314,7 @@ class InferenceService:
         """Submit request to batch queue and wait for result."""
         loop = asyncio.get_running_loop()
         future = loop.create_future()
-        await self._batch_queue.put((req, future))
+        await self._batch_queue.put((req, future))  # type: ignore[union-attr]
         return await future
 
     async def _batch_scheduler_loop(self) -> None:
@@ -324,7 +324,7 @@ class InferenceService:
                 batch: list[tuple[SynthesisRequest, asyncio.Future]] = []
 
                 # Wait for first request
-                first = await self._batch_queue.get()
+                first = await self._batch_queue.get()  # type: ignore[union-attr]
                 batch.append(first)
 
                 # Collect more until timeout or max size
@@ -335,7 +335,7 @@ class InferenceService:
                         break
                     try:
                         item = await asyncio.wait_for(
-                            self._batch_queue.get(), timeout=remaining
+                            self._batch_queue.get(), timeout=remaining  # type: ignore[union-attr]
                         )
                         batch.append(item)
                     except asyncio.TimeoutError:
@@ -426,7 +426,7 @@ class InferenceService:
 
     async def _synthesize_threaded(self, req: SynthesisRequest) -> SynthesisResult:
         """Threaded inference with semaphore (single-worker fallback mode)."""
-        async with self._semaphore:
+        async with self._semaphore:  # type: ignore[union-attr]
             try:
                 result = await asyncio.wait_for(
                     asyncio.get_running_loop().run_in_executor(
