@@ -285,6 +285,7 @@ def test_speech_clone_invalid_audio_format(client, tmp_path):
             data={
                 "text": "Hello world",
                 "speed": 1.0,
+                "ref_text": "Some transcript.",
             },
             files={"ref_audio": ("fake.wav", f, "audio/wav")},
         )

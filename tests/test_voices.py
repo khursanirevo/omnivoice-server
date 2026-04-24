@@ -97,7 +97,7 @@ def test_create_profile_duplicate_rejected(client, sample_audio_bytes):
     for _ in range(2):
         resp = client.post(
             "/v1/voices/profiles",
-            data={"profile_id": "dup"},
+            data={"profile_id": "dup", "ref_text": "Duplicate test transcript."},
             files={"ref_audio": ("ref.wav", io.BytesIO(sample_audio_bytes), "audio/wav")},
         )
     assert resp.status_code == 409
@@ -107,7 +107,7 @@ def test_delete_profile(client, sample_audio_bytes):
     """DELETE returns 204."""
     client.post(
         "/v1/voices/profiles",
-        data={"profile_id": "to-delete"},
+        data={"profile_id": "to-delete", "ref_text": "Delete test transcript."},
         files={"ref_audio": ("ref.wav", io.BytesIO(sample_audio_bytes), "audio/wav")},
     )
     resp = client.delete("/v1/voices/profiles/to-delete")

@@ -97,8 +97,8 @@ async def lifespan(app: FastAPI):
                 }, f)
             logger.info("VRAM measurement written: %.0f MB -> %s", peak_mb, vram_file)
 
-    # Auto-benchmark and warmup
-    if app.state.model_svc.is_loaded:
+    # Auto-benchmark and warmup (CUDA only — benchmark has no meaning on CPU/MPS)
+    if app.state.model_svc.is_loaded and cfg.device == "cuda":
         from .services.gpu_benchmark import find_optimal_batch_size
 
         # Run GPU benchmark to find optimal batch size (blocking, run in executor)
